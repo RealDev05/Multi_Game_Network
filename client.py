@@ -9,7 +9,7 @@ import sys
 import math
 import select
 from protocol import MessageType, encode_message, decode_message
-from entities import Player, Bullet, Obstacle, draw_text
+from entities import Player, Bullet, Obstacle, Crate, LaserBeam, draw_text
 
 
 class GameState:
@@ -57,6 +57,8 @@ class GameClient:
         # Bullets
         self.bullets = []
         self.obstacles = []
+        self.crates = {}    # crate_id -> Crate
+        self.lasers = []    # list of LaserBeam
 
         # Input state — polled each frame via pygame.key.get_pressed()
         self.keys_down = {
@@ -191,9 +193,34 @@ class GameClient:
                     bullet_data["y"],
                     bullet_data["vx"],
                     bullet_data["vy"],
-                    bullet_data["owner_id"]
+                    bullet_data["owner_id"],
+                    bullet_data.get("btype", "normal"),
                 )
                 self.bullets.append(bullet)
+
+            # Update crates
+            new_crate_ids = set()
+            for cd in data.get("crates", []):
+                cid = cd["id"]
+                new_crate_ids.add(cid)
+                if cid in self.crates:
+                    self.crates[cid].update_from_server(cd)
+                else:
+                    self.crates[cid] = Crate(
+                        cid, cd["x"], cd["y"], cd["ctype"])
+            # Remove crates that disappeared
+            for gone in list(self.crates.keys()):
+                if gone not in new_crate_ids:
+                    del self.crates[gone]
+
+            # Update laser beams
+            self.lasers = []
+            for ld in data.get("lasers", []):
+                beam = LaserBeam(
+                    ld["x1"], ld["y1"], ld["x2"], ld["y2"],
+                    tuple(ld["owner_color"]),
+                )
+                self.lasers.append(beam)
 
     def send_message(self, msg_type: MessageType, data: dict = None):
         """Send a message to the server."""
@@ -356,11 +383,20 @@ class GameClient:
 
     def draw_game(self):
         """Draw the game screen."""
+        dt = self.clock.get_time() / 1000.0
         self.screen.fill((40, 40, 60))
 
-        # Draw obstacles first (beneath players and bullets)
+        # Draw obstacles first (beneath everything)
         for obstacle in self.obstacles:
             obstacle.draw(self.screen)
+
+        # Draw crates (snapshot to avoid mutation-during-iteration)
+        for crate in list(self.crates.values()):
+            crate.draw(self.screen, dt)
+
+        # Draw laser beams (above obstacles, beneath players)
+        for beam in self.lasers:
+            beam.draw(self.screen)
 
         # Draw all players
         for player in self.players.values():
@@ -382,6 +418,23 @@ class GameClient:
         alive_count = sum(1 for p in self.players.values() if p.alive)
         draw_text(self.screen, f"Players alive: {alive_count}/{len(self.players)}",
                   (10, 40), self.font_small, (255, 255, 255))
+
+        # ── Power-up HUD (bottom-left) ──
+        if self.client_id in self.players:
+            from entities import CRATE_COLORS, _draw_diamond
+            p = self.players[self.client_id]
+            hud_x, hud_y = 10, 560
+            hud_items = [
+                ("shield",  CRATE_COLORS["shield"],  p.shield),
+                ("laser",   CRATE_COLORS["laser"],   p.laser_shots),
+                ("bouncy",  CRATE_COLORS["bouncy"],  p.bouncy_shots),
+            ]
+            for label, col, count in hud_items:
+                if count > 0:
+                    _draw_diamond(self.screen, col, hud_x + 6, hud_y, 6)
+                    draw_text(self.screen, f"×{count}",
+                              (hud_x + 16, hud_y - 7), self.font_small, col)
+                    hud_x += 48
 
     def handle_menu_click(self, pos, host_rect, join_rect, port_rect, ip_rect, port_rect2):
         """Handle mouse clicks in menu."""
