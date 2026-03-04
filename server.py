@@ -15,6 +15,11 @@ from protocol import MessageType, encode_message, decode_message
 
 # ── Obstacle generation constants ──────────────────────────────────────────────
 MAP_W, MAP_H = 800, 600
+MAP_SIZES = {
+    "small":  (800,  600),
+    "medium": (1100, 750),
+    "large":  (1400, 900),
+}
 PLAYER_RADIUS = 15
 OBS_MIN_W, OBS_MAX_W = 40, 120
 OBS_MIN_H, OBS_MAX_H = 40, 100
@@ -26,12 +31,20 @@ MAX_OBSTACLES = 20
 MAX_FAILURES = 300   # consecutive placement failures before giving up
 BFS_CELL = 20    # grid cell size for BFS connectivity check
 
-# Spread-out spawn positions kept clear of obstacles
-SPAWN_POSITIONS = [
-    (100, 100), (700, 100), (100, 500), (700, 500),
-    (400,  80), (400, 520), (80, 300), (720, 300),
-    (250, 200), (550, 400),
-]
+
+def _make_spawn_positions(w, h):
+    """Return 10 spread-out spawn points scaled to the given map dimensions."""
+    return [
+        (100, 100),       (w - 100, 100),
+        (100, h - 100),   (w - 100, h - 100),
+        (w // 2, 80),     (w // 2, h - 80),
+        (80, h // 2),     (w - 80, h // 2),
+        (w // 4, h // 4), (3 * w // 4, 3 * h // 4),
+    ]
+
+
+# Initialised with default (small) dimensions; updated in start_game()
+SPAWN_POSITIONS = _make_spawn_positions(MAP_W, MAP_H)
 
 # ── Crate constants ───────────────────────────────────────────────────────────────
 # shield and bouncy appear twice → 2× more likely than health and laser
@@ -287,6 +300,7 @@ class GameServer:
         self._pending_game_over = None
 
         self.lock = threading.Lock()
+        self._selected_map_size = "small"  # console-configurable before game start
 
     def start(self):
         """Start the server."""
@@ -295,6 +309,8 @@ class GameServer:
             socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server_socket.bind((self.host, self.port))
         self.server_socket.listen(10)
+        # wake up accept() every second to check self.running
+        self.server_socket.settimeout(1.0)
         self.running = True
 
         print(f"Server started on port {self.port}")
@@ -324,6 +340,8 @@ class GameServer:
                 )
                 client_thread.daemon = True
                 client_thread.start()
+            except socket.timeout:
+                continue  # just a 1-second heartbeat; check self.running and loop
             except Exception as e:
                 if self.running:
                     print(f"Error accepting connection: {e}")
@@ -440,8 +458,11 @@ class GameServer:
         elif msg_type == MessageType.REQUEST_START:
             # Only the host (first connected player) can start
             if client_id == 1:
-                if self.start_game():
-                    print(f"Game started by host (player {client_id})")
+                map_size = (data or {}).get(
+                    "map_size") or self._selected_map_size
+                if self.start_game(map_size):
+                    print(
+                        f"Game started by host (player {client_id}), map: {map_size}")
                 else:
                     print(
                         f"Start requested by player {client_id} but conditions not met")
@@ -587,8 +608,10 @@ class GameServer:
                                 player["input"]["shoot"] = False
 
                     # Keep player in bounds
-                    player["x"] = max(20, min(780, player["x"]))
-                    player["y"] = max(20, min(580, player["y"]))
+                    player["x"] = max(PLAYER_RADIUS, min(
+                        MAP_W - PLAYER_RADIUS, player["x"]))
+                    player["y"] = max(PLAYER_RADIUS, min(
+                        MAP_H - PLAYER_RADIUS, player["y"]))
 
                     # Resolve player-vs-obstacle collisions (circle push-out)
                     px, py = player["x"], player["y"]
@@ -619,8 +642,10 @@ class GameServer:
                             overlap = PLAYER_RADIUS - dist
                             px += (dx / dist) * overlap
                             py += (dy / dist) * overlap
-                    player["x"] = max(20, min(780, px))
-                    player["y"] = max(20, min(580, py))
+                    player["x"] = max(PLAYER_RADIUS, min(
+                        MAP_W - PLAYER_RADIUS, px))
+                    player["y"] = max(PLAYER_RADIUS, min(
+                        MAP_H - PLAYER_RADIUS, py))
 
                 # Update bullets
                 bullets_to_remove = []
@@ -791,16 +816,33 @@ class GameServer:
                 self.broadcast(MessageType.GAME_OVER, self._pending_game_over)
                 self._pending_game_over = None
 
-    def start_game(self):
+    def start_game(self, map_size=None):
         """Start the game."""
+        global MAP_W, MAP_H, SPAWN_POSITIONS
+        if map_size is None:
+            map_size = self._selected_map_size
         with self.lock:
             if not (len(self.ready_players) == len(self.players) and len(self.players) > 1):
                 return False
             self.game_started = True
-        # Generate obstacles outside the lock (CPU work + avoids broadcast deadlock)
+        # Apply map dimensions (updates globals used by all helper functions)
+        map_w, map_h = MAP_SIZES.get(map_size, (800, 600))
+        MAP_W, MAP_H = map_w, map_h
+        SPAWN_POSITIONS = _make_spawn_positions(map_w, map_h)
+        # Re-position players at spawn points appropriate for the chosen map size
+        with self.lock:
+            for i, player in enumerate(self.players.values()):
+                sx, sy = SPAWN_POSITIONS[i % len(SPAWN_POSITIONS)]
+                player["x"] = float(sx)
+                player["y"] = float(sy)
         self.obstacles = generate_obstacles()
-        print("Game starting!")
-        self.broadcast(MessageType.GAME_START, {"obstacles": self.obstacles})
+        print(f"Game starting! Map: {map_size} ({map_w}\u00d7{map_h})")
+        self.broadcast(MessageType.GAME_START, {
+            "obstacles": self.obstacles,
+            "map_w": map_w,
+            "map_h": map_h,
+            "map_size": map_size,
+        })
         return True
 
     def stop(self):
@@ -813,7 +855,10 @@ class GameServer:
                 except:
                     pass
         if self.server_socket:
-            self.server_socket.close()
+            try:
+                self.server_socket.close()
+            except:
+                pass
 
 
 def main():
@@ -826,24 +871,116 @@ def main():
     server = GameServer(port)
     server.start()
 
-    print("\nServer commands:")
-    print("  start - Start the game when all players are ready")
-    print("  quit - Stop the server")
+    def print_help():
+        print("""
+Commands:
+  status          — player count, ready count, map size, game state
+  players         — list every connected player with ready/alive state
+  map [size]      — show or set map size: small | medium | large
+  start           — start the game using the current map size
+  kick <id>       — disconnect a player by their ID
+  help            — show this message
+  quit            — shut down the server
+""")
+
+    print(f"\nServer listening on port {port}.  Type 'help' for commands.")
+    print(f"Default map size: {server._selected_map_size}")
 
     try:
         while server.running:
-            cmd = input("> ").strip().lower()
+            try:
+                raw = input("> ").strip()
+            except EOFError:
+                # stdin closed (e.g. running as a background service)
+                import time
+                while server.running:
+                    time.sleep(1)
+                break
+
+            if not raw:
+                continue
+            parts = raw.split()
+            cmd = parts[0].lower()
+
             if cmd == "quit":
                 break
-            elif cmd == "start":
-                if server.start_game():
-                    print("Game started!")
-                else:
-                    print(
-                        "Cannot start: Not all players are ready or no players connected")
+
+            elif cmd == "help":
+                print_help()
+
             elif cmd == "status":
-                print(
-                    f"Players: {len(server.players)}, Ready: {len(server.ready_players)}, Game started: {server.game_started}")
+                with server.lock:
+                    np = len(server.players)
+                    nr = len(server.ready_players)
+                w, h = MAP_SIZES[server._selected_map_size]
+                print(f"  Players : {np}")
+                print(f"  Ready   : {nr}/{np}")
+                print(f"  Map     : {server._selected_map_size}  ({w}×{h})")
+                print(f"  Started : {server.game_started}")
+
+            elif cmd == "players":
+                with server.lock:
+                    snapshot = dict(server.players)
+                    ready = set(server.ready_players)
+                if not snapshot:
+                    print("  No players connected.")
+                for pid, p in snapshot.items():
+                    r = "READY  " if pid in ready else "waiting"
+                    alive = "alive" if p.get("alive", True) else "dead "
+                    print(f"  [{pid}] {r}  {alive}  color={p['color']}")
+
+            elif cmd == "map":
+                if len(parts) < 2:
+                    w, h = MAP_SIZES[server._selected_map_size]
+                    print(
+                        f"  Current map size: {server._selected_map_size} ({w}×{h})")
+                    print(
+                        "  Available: small (800×600)  medium (1100×750)  large (1400×900)")
+                else:
+                    size = parts[1].lower()
+                    if size not in MAP_SIZES:
+                        print("  Invalid size. Choose: small, medium, large")
+                    elif server.game_started:
+                        print(
+                            "  Game already running — map size cannot be changed mid-game.")
+                    else:
+                        server._selected_map_size = size
+                        w, h = MAP_SIZES[size]
+                        print(f"  Map size set to {size} ({w}×{h}).")
+
+            elif cmd == "start":
+                size = server._selected_map_size
+                if server.start_game(size):
+                    print(f"  Game started! Map: {size}")
+                else:
+                    with server.lock:
+                        np = len(server.players)
+                        nr = len(server.ready_players)
+                    print(
+                        f"  Cannot start: {nr}/{np} players ready (need all ready + ≥2 players).")
+
+            elif cmd == "kick":
+                if len(parts) < 2:
+                    print("  Usage: kick <player_id>")
+                else:
+                    try:
+                        target = int(parts[1])
+                        with server.lock:
+                            sock = server.clients.get(target)
+                        if sock:
+                            try:
+                                sock.close()
+                            except Exception:
+                                pass
+                            print(f"  Kicked player {target}.")
+                        else:
+                            print(f"  Player {target} not found.")
+                    except ValueError:
+                        print("  Player ID must be a number.")
+
+            else:
+                print(f"  Unknown command '{cmd}'. Type 'help' for a list.")
+
     except KeyboardInterrupt:
         print("\nShutting down...")
     finally:
