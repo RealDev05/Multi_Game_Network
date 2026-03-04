@@ -299,8 +299,10 @@ class GameServer:
         self._crate_spawn_timer = CRATE_SPAWN_INTERVAL
         self._pending_game_over = None
 
-        self.lock = threading.Lock()
+        # reentrant: broadcast() can call remove_client() safely
+        self.lock = threading.RLock()
         self._selected_map_size = "small"  # console-configurable before game start
+        self._autostart = False            # auto-start when all players ready
 
     def start(self):
         """Start the server."""
@@ -454,6 +456,15 @@ class GameServer:
             })
             print(
                 f"Player {client_id} is ready ({len(self.ready_players)}/{len(self.players)})")
+            # Autostart: fire if enabled and every connected player is now ready
+            if self._autostart and not self.game_started:
+                with self.lock:
+                    all_ready = (len(self.ready_players) == len(self.players)
+                                 and len(self.players) > 1)
+                if all_ready:
+                    size = self._selected_map_size
+                    if self.start_game(size):
+                        print(f"Autostart triggered! Map: {size}")
 
         elif msg_type == MessageType.REQUEST_START:
             # Only the host (first connected player) can start
@@ -874,17 +885,19 @@ def main():
     def print_help():
         print("""
 Commands:
-  status          — player count, ready count, map size, game state
-  players         — list every connected player with ready/alive state
-  map [size]      — show or set map size: small | medium | large
-  start           — start the game using the current map size
-  kick <id>       — disconnect a player by their ID
-  help            — show this message
-  quit            — shut down the server
+  status             — player count, ready count, map size, game state
+  players            — list every connected player with ready/alive state
+  map [size]         — show or set map size: small | medium | large
+  autostart [on|off] — show or toggle auto-start when all players ready
+  start              — start the game using the current map size
+  kick <id>          — disconnect a player by their ID
+  help               — show this message
+  quit               — shut down the server
 """)
 
     print(f"\nServer listening on port {port}.  Type 'help' for commands.")
-    print(f"Default map size: {server._selected_map_size}")
+    print(f"Default map size : {server._selected_map_size}")
+    print(f"Autostart        : {'on' if server._autostart else 'off'}")
 
     try:
         while server.running:
@@ -903,7 +916,10 @@ Commands:
             cmd = parts[0].lower()
 
             if cmd == "quit":
-                break
+                print("  Shutting down...")
+                server.stop()
+                import os
+                os._exit(0)
 
             elif cmd == "help":
                 print_help()
@@ -913,10 +929,30 @@ Commands:
                     np = len(server.players)
                     nr = len(server.ready_players)
                 w, h = MAP_SIZES[server._selected_map_size]
-                print(f"  Players : {np}")
-                print(f"  Ready   : {nr}/{np}")
-                print(f"  Map     : {server._selected_map_size}  ({w}×{h})")
-                print(f"  Started : {server.game_started}")
+                print(f"  Players   : {np}")
+                print(f"  Ready     : {nr}/{np}")
+                print(
+                    f"  Map       : {server._selected_map_size}  ({w}\u00d7{h})")
+                print(f"  Autostart : {'on' if server._autostart else 'off'}")
+                print(f"  Started   : {server.game_started}")
+
+            elif cmd == "autostart":
+                if len(parts) < 2:
+                    state = 'on' if server._autostart else 'off'
+                    print(f"  Autostart is currently {state}.")
+                    print("  Usage: autostart on | autostart off")
+                else:
+                    arg = parts[1].lower()
+                    if arg == "on":
+                        server._autostart = True
+                        print(
+                            "  Autostart ON — game will begin as soon as all players are ready.")
+                    elif arg == "off":
+                        server._autostart = False
+                        print(
+                            "  Autostart OFF — use 'start' or the in-game button to begin.")
+                    else:
+                        print("  Usage: autostart on | autostart off")
 
             elif cmd == "players":
                 with server.lock:
