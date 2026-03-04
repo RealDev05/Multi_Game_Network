@@ -1,6 +1,6 @@
 # Tank Battle - Multiplayer Game
 
-A simple multiplayer tank battle game built with Python, Pygame, and sockets.
+A real-time multiplayer tank battle game built with Python, Pygame, and sockets. Features power-up crates, destructible obstacles, bouncy bullets, laser shots, and variable map sizes.
 
 ## Requirements
 
@@ -17,71 +17,129 @@ pip install pygame
 
 ### Starting the Game
 
-Run the main file:
-
 ```bash
 python main.py
 ```
 
-### Hosting a Game
+---
 
-1. Click "HOST GAME" on the main menu
-2. Specify a port (default is 5001)
-3. Your server IP and port will be displayed in the lobby
-4. Wait for other players to join
-5. Click "READY" when you're ready
-6. Once all players are ready, click "START GAME" to begin
+### Hosting a Game (Local)
+
+1. Click **HOST GAME** on the main menu
+2. Set a port (default: `5001`)
+3. In the lobby, select a **map size** (Small / Medium / Large)
+4. Your local IP and port are displayed for other players to join
+5. Click **READY** when ready
+6. Once all players are ready, click **START GAME**
 
 ### Joining a Game
 
-1. Click "JOIN GAME" on the main menu
+1. Click **JOIN GAME** on the main menu
 2. Enter the host's IP address and port
-3. Click "READY" when you're ready to play
-4. Wait for the host to start the game
+   - Click a field to activate it, then type, or use **Ctrl+V** to paste, **Ctrl+A** to select all, **Ctrl+C** to copy
+3. Click **READY** and wait for the host to start
 
-### Game Controls
+---
 
-- **W** - Move up
-- **A** - Move left
-- **S** - Move down
-- **D** - Move right
-- **Left Arrow** - Rotate turret counter-clockwise
-- **Right Arrow** - Rotate turret clockwise
-- **Space** - Shoot
+### Running a Dedicated Server (VM / Always-On Host)
 
-### Gameplay
+```bash
+python server.py <port>
+# Example:
+python server.py 5003
+```
 
-- Each player is a colored dot with a turret
-- Shoot bolts at opponents to reduce their health (3 hits to eliminate)
-- Eliminated players become ghosts and can spectate
-- Movement is holonomic (direction doesn't affect movement - W always moves up, etc.)
-- Last player standing wins!
+Players join by entering the server's public IP and port in the JOIN GAME screen.
+
+#### Server Console Commands
+
+| Command            | Description                                               |
+| ------------------ | --------------------------------------------------------- |
+| `status`           | Show player count, ready count, map size, autostart state |
+| `players`          | List all connected players with ready/alive status        |
+| `map`              | Show current map size and available options               |
+| `map <size>`       | Set map size: `small`, `medium`, or `large`               |
+| `autostart on/off` | Auto-start the game as soon as all players are ready      |
+| `start`            | Force-start the game immediately                          |
+| `kick <id>`        | Disconnect a player by their ID                           |
+| `help`             | Show all commands                                         |
+| `quit`             | Shut down the server                                      |
+
+---
+
+## Game Controls
+
+| Key               | Action                                      |
+| ----------------- | ------------------------------------------- |
+| **W / A / S / D** | Move up / left / down / right               |
+| **← / →**         | Rotate turret counter-clockwise / clockwise |
+| **Space**         | Shoot                                       |
+
+Movement is **holonomic** — W always moves up regardless of where your turret is pointing.
+
+---
+
+## Gameplay
+
+- Each player is a colored tank with a rotating turret
+- **3 hits** to eliminate a player (health bar shown above each tank)
+- Eliminated players become **spectators** (ghost mode)
+- Last player standing wins
+
+### Obstacles
+
+- Random rectangular obstacles are generated each game
+- BFS connectivity ensures no player can ever be enclosed
+- Bullets collide with obstacles; bouncy bullets reflect off them
+
+### Power-up Crates
+
+Crates spawn on the map periodically (up to 5 at once, every 8 seconds, 12-second lifetime). Walk over one to collect it.
+
+| Crate     | Label | Effect                                  | Rarity          |
+| --------- | ----- | --------------------------------------- | --------------- |
+| 🔴 Health | **H** | Restores 1 HP (max 3)                   | Rare (1-in-6)   |
+| 🔵 Shield | **S** | Absorbs 1 hit (stackable up to 3)       | Common (1-in-3) |
+| 🟣 Laser  | **L** | Next shot is an instant laser beam      | Rare (1-in-6)   |
+| 🟢 Bouncy | **B** | Next 3 shots bounce off walls/obstacles | Common (1-in-3) |
+
+Active power-ups are shown in the **bottom-left HUD** as colored diamond icons with a count.
+
+#### Bullet Types
+
+- **Normal** — standard bullet, destroyed on obstacle hit
+- **Laser** — instant beam, hits the first player in line of sight
+- **Bouncy** — reflects off walls and obstacles (up to 3 bounces); can hurt the shooter _after_ the first bounce
+
+---
+
+## Map Sizes
+
+| Size   | Dimensions |
+| ------ | ---------- |
+| Small  | 800 × 600  |
+| Medium | 1100 × 750 |
+| Large  | 1400 × 900 |
+
+The host selects the map size in the lobby (or via the `map` command on a dedicated server). All clients resize their window automatically when the game starts.
+
+---
 
 ## Files
 
-- `main.py` - Entry point for the game
-- `client.py` - Game client with pygame UI and networking
-- `server.py` - Dedicated game server (auto-started when hosting)
-- `protocol.py` - Network protocol definitions
-- `entities.py` - Game entities (Player, Bullet classes)
-
-## Features
-
-- Real-time multiplayer action
-- Unique color assignment for each player
-- Lobby system with ready status
-- Host-controlled game start
-- Ghost mode for eliminated players
-- Health bars
-- Smooth 60 FPS gameplay
+| File          | Description                                                     |
+| ------------- | --------------------------------------------------------------- |
+| `main.py`     | Entry point — prints controls and launches the client           |
+| `client.py`   | Pygame UI, input handling, rendering, network client            |
+| `server.py`   | Authoritative game server — physics, collision, state sync      |
+| `protocol.py` | Message type enum and JSON encode/decode helpers                |
+| `entities.py` | Renderable entities: Player, Bullet, Obstacle, Crate, LaserBeam |
 
 ## Architecture
 
-The game uses a client-server architecture:
+Client-server over TCP with newline-delimited JSON messages:
 
-- The server manages game state and synchronizes all clients
-- Clients send input commands and receive game state updates
-- All game logic (collision detection, bullet physics) runs on the server
-- Clients render the game based on server updates
-
-Enjoy the game!
+- The **server** is authoritative for all physics, collision detection, bullet movement, crate spawning, and win conditions
+- **Clients** send keyboard input each frame and receive the full game state at 60 FPS to render
+- The host client auto-starts a local `server.py` subprocess; a dedicated server can also be run independently
+- Input uses `pygame.key.get_pressed()` polling with a force-resend every 15 frames to self-heal desyncs
