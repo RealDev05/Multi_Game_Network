@@ -27,6 +27,7 @@ class GameClient:
         pygame.init()
         self.screen = pygame.display.set_mode((800, 600))
         pygame.display.set_caption("Tank Battle")
+        pygame.scrap.init()   # clipboard support (must be after display init)
         self.clock = pygame.time.Clock()
 
         # Fonts
@@ -284,7 +285,9 @@ class GameClient:
 
         # Port input for host
         port_rect = pygame.Rect(250, 320, 300, 40)
-        pygame.draw.rect(self.screen, (50, 50, 70), port_rect, 2)
+        border_col = (255, 200, 0) if (self.active_input ==
+                                       "host" and self.input_select_all) else (50, 50, 70)
+        pygame.draw.rect(self.screen, border_col, port_rect, 2)
         port_text = f"Port: {self.input_buffer['host']}"
         if self.active_input == "host":
             port_text += "_"
@@ -298,7 +301,9 @@ class GameClient:
 
         # IP input
         ip_rect = pygame.Rect(250, 470, 200, 40)
-        pygame.draw.rect(self.screen, (50, 50, 70), ip_rect, 2)
+        border_col = (255, 200, 0) if (self.active_input ==
+                                       "join_ip" and self.input_select_all) else (50, 50, 70)
+        pygame.draw.rect(self.screen, border_col, ip_rect, 2)
         ip_text = f"{self.input_buffer['join_ip']}"
         if self.active_input == "join_ip":
             ip_text += "_"
@@ -306,11 +311,16 @@ class GameClient:
 
         # Port input for join
         port_rect2 = pygame.Rect(460, 470, 90, 40)
-        pygame.draw.rect(self.screen, (50, 50, 70), port_rect2, 2)
+        border_col = (255, 200, 0) if (self.active_input ==
+                                       "join_port" and self.input_select_all) else (50, 50, 70)
+        pygame.draw.rect(self.screen, border_col, port_rect2, 2)
         port_text2 = f"{self.input_buffer['join_port']}"
         if self.active_input == "join_port":
             port_text2 += "_"
         draw_text(self.screen, port_text2, (470, 480), self.font_small)
+
+        draw_text(self.screen, "Click a field then Ctrl+V to paste",
+                  (400, 548), self.font_small, (100, 100, 140), center=True)
 
         return host_rect, join_rect, port_rect, ip_rect, port_rect2
 
@@ -498,10 +508,13 @@ class GameClient:
 
         elif port_rect.collidepoint(pos):
             self.active_input = "host"
+            self.input_select_all = False
         elif ip_rect.collidepoint(pos):
             self.active_input = "join_ip"
+            self.input_select_all = False
         elif port_rect2.collidepoint(pos):
             self.active_input = "join_port"
+            self.input_select_all = False
 
     def handle_lobby_click(self, pos, ready_rect, start_rect, small_rect, medium_rect, large_rect):
         """Handle mouse clicks in lobby."""
@@ -523,11 +536,19 @@ class GameClient:
         """Handle text input for menu fields."""
         if self.active_input and self.state == GameState.MENU:
             if text == '\b':  # Backspace
-                if len(self.input_buffer[self.active_input]) > 0:
+                if self.input_select_all:
+                    self.input_buffer[self.active_input] = ""
+                    self.input_select_all = False
+                elif len(self.input_buffer[self.active_input]) > 0:
                     self.input_buffer[self.active_input] = self.input_buffer[self.active_input][:-1]
             elif text == '\r':  # Enter
                 self.active_input = None
+                self.input_select_all = False
             else:
+                # If field is fully selected, replace it
+                if self.input_select_all:
+                    self.input_buffer[self.active_input] = ""
+                    self.input_select_all = False
                 # Filter valid characters based on input type
                 if self.active_input == "join_ip":
                     if text in "0123456789.abcdefghijklmnopqrstuvwxyz":
@@ -555,7 +576,30 @@ class GameClient:
 
                 elif event.type == pygame.KEYDOWN:
                     if self.state == GameState.MENU:
-                        if event.key == pygame.K_BACKSPACE:
+                        if event.key == pygame.K_a and (event.mod & pygame.KMOD_CTRL):
+                            if self.active_input:
+                                self.input_select_all = True
+                        elif event.key == pygame.K_c and (event.mod & pygame.KMOD_CTRL):
+                            if self.active_input:
+                                try:
+                                    text = self.input_buffer[self.active_input]
+                                    pygame.scrap.put(pygame.SCRAP_TEXT,
+                                                     text.encode("utf-8") + b"\x00")
+                                except Exception:
+                                    pass
+                        elif event.key == pygame.K_v and (event.mod & pygame.KMOD_CTRL):
+                            if self.active_input:
+                                try:
+                                    raw = pygame.scrap.get(pygame.SCRAP_TEXT)
+                                    if raw:
+                                        pasted = raw.decode(
+                                            "utf-8", errors="ignore"
+                                        ).replace("\x00", "").strip()
+                                        for ch in pasted:
+                                            self.handle_text_input(ch)
+                                except Exception:
+                                    pass
+                        elif event.key == pygame.K_BACKSPACE:
                             self.handle_text_input('\b')
                         elif event.key == pygame.K_RETURN:
                             self.handle_text_input('\r')
