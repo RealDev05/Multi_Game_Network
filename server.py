@@ -33,6 +33,21 @@ SPAWN_POSITIONS = [
     (250, 200), (550, 400),
 ]
 
+# ── Crate constants ───────────────────────────────────────────────────────────────
+# shield and bouncy appear twice → 2× more likely than health and laser
+CRATE_TYPES = ["shield", "shield", "bouncy", "bouncy", "health", "laser"]
+CRATE_PICKUP_RADIUS = 20      # px — walk over to collect
+CRATE_LIFETIME = 12.0    # seconds before disappearing
+CRATE_SPAWN_INTERVAL = 8.0    # seconds between spawn attempts
+MAX_CRATES = 5       # max crates on map at once
+CRATE_WALL_MARGIN = 25      # keep away from edges
+CRATE_OBS_MARGIN = 18      # keep away from obstacle edges
+CRATE_SPAWN_ATTEMPTS = 100    # max random attempts per spawn
+MAX_SHIELD = 3       # maximum shield stacks
+BOUNCY_SHOTS_PER_CRATE = 3   # bouncy bullets granted per crate
+BOUNCY_MAX_BOUNCES = 3       # how many times a bouncy bullet can reflect
+LASER_BULLET_SPEED = 0       # lasers are instant — not a moving projectile
+
 
 # ── Obstacle generation helpers ─────────────────────────────────────────────────
 
@@ -112,6 +127,80 @@ def _near_spawn(nx, ny, nw, nh):
     return False
 
 
+def _crate_spawn_pos(obstacles):
+    """Return (x, y) for a new crate not inside any obstacle, or None on failure."""
+    for _ in range(CRATE_SPAWN_ATTEMPTS):
+        x = random.randint(CRATE_WALL_MARGIN, MAP_W - CRATE_WALL_MARGIN)
+        y = random.randint(CRATE_WALL_MARGIN, MAP_H - CRATE_WALL_MARGIN)
+        blocked = False
+        for obs in obstacles:
+            ox, oy, ow, oh = obs["x"], obs["y"], obs["w"], obs["h"]
+            if (ox - CRATE_OBS_MARGIN <= x <= ox + ow + CRATE_OBS_MARGIN and
+                    oy - CRATE_OBS_MARGIN <= y <= oy + oh + CRATE_OBS_MARGIN):
+                blocked = True
+                break
+        if not blocked:
+            return x, y
+    return None
+
+
+def cast_laser(ox, oy, angle_deg, players, obstacles, shooter_id):
+    """
+    Cast an instant laser from (ox, oy) along angle_deg.
+    Returns (hits, x2, y2) where hits is a list of player dicts that were struck
+    and (x2, y2) is where the beam ends (first wall boundary, goes through everything).
+    The laser ignores obstacles but hits all alive enemies in order along the ray.
+    """
+    angle_rad = math.radians(angle_deg)
+    dx = math.cos(angle_rad)
+    dy = math.sin(angle_rad)
+
+    # Find wall boundary t
+    t_max = float('inf')
+    if dx > 0:
+        t_max = min(t_max, (MAP_W - ox) / dx)
+    elif dx < 0:
+        t_max = min(t_max, (0 - ox) / dx)
+    if dy > 0:
+        t_max = min(t_max, (MAP_H - oy) / dy)
+    elif dy < 0:
+        t_max = min(t_max, (0 - oy) / dy)
+    t_max = max(t_max, 0)
+
+    x2 = ox + dx * t_max
+    y2 = oy + dy * t_max
+
+    # Check every alive enemy for intersection with the ray
+    hits = []
+    for pid, player in players.items():
+        if pid == shooter_id or not player.get("alive", True):
+            continue
+        px, py = player["x"], player["y"]
+        r = PLAYER_RADIUS
+        # Project player centre onto ray, clamp to [0, t_max]
+        fx, fy = px - ox, py - oy
+        t = fx * dx + fy * dy
+        t = max(0, min(t, t_max))
+        cx = ox + dx * t - px
+        cy = oy + dy * t - py
+        if cx * cx + cy * cy <= r * r:
+            hits.append(player)
+    return hits, x2, y2
+
+
+def _apply_crate(ctype, player):
+    """Apply a crate effect to a player dict."""
+    if ctype == "health":
+        player["health"] = 3
+    elif ctype == "shield":
+        player["shield"] = min(player.get("shield", 0) + 1, MAX_SHIELD)
+    elif ctype == "laser":
+        player["laser_shots"] = player.get("laser_shots", 0) + 1
+    elif ctype == "bouncy":
+        player["bouncy_shots"] = player.get(
+            "bouncy_shots", 0) + BOUNCY_SHOTS_PER_CRATE
+
+
 def generate_obstacles():
     """
     Randomly place rectangular obstacles subject to:
@@ -187,9 +276,15 @@ class GameServer:
         # Game state
         self.game_state = {
             "players": {},
-            "bullets": []
+            "bullets": [],
+            "crates":  [],
+            "lasers":  [],
         }
         self.obstacles = []  # set once at game start by generate_obstacles()
+        self._crates = {}    # crate_id -> crate dict
+        self._next_crate_id = 1
+        self._crate_spawn_timer = CRATE_SPAWN_INTERVAL
+        self._pending_game_over = None
 
         self.lock = threading.Lock()
 
@@ -274,7 +369,10 @@ class GameServer:
                 "y": float(spawn_pos[1]),
                 "angle": 0,
                 "health": 3,
-                "alive": True
+                "alive": True,
+                "shield": 0,
+                "laser_shots": 0,
+                "bouncy_shots": 0,
             }
 
             print(
@@ -437,17 +535,46 @@ class GameServer:
                     # Shooting
                     if player_input.get("shoot") and not player.get("shot_cooldown", False):
                         angle_rad = math.radians(player["angle"])
-                        bullet = {
-                            "owner_id": client_id,
-                            "x": player["x"],
-                            "y": player["y"],
-                            "vx": math.cos(angle_rad) * 400,
-                            "vy": math.sin(angle_rad) * 400,
-                            "lifetime": 2.0
-                        }
-                        self.game_state["bullets"].append(bullet)
+
+                        if player.get("laser_shots", 0) > 0:
+                            # Instant laser
+                            player["laser_shots"] -= 1
+                            hits, x2, y2 = cast_laser(
+                                player["x"], player["y"], player["angle"],
+                                self.players, self.obstacles, client_id)
+                            for hit_player in hits:
+                                if hit_player.get("shield", 0) > 0:
+                                    hit_player["shield"] -= 1
+                                else:
+                                    hit_player["health"] -= 1
+                                    if hit_player["health"] <= 0:
+                                        hit_player["alive"] = False
+                                        hit_player["health"] = 0
+                            # Store laser beam for clients (disappears after one broadcast cycle)
+                            self.game_state["lasers"].append({
+                                "x1": player["x"], "y1": player["y"],
+                                "x2": x2, "y2": y2,
+                                "owner_color": list(player["color"]),
+                                "lifetime": 0.15,
+                            })
+                        else:
+                            btype = "bouncy" if player.get(
+                                "bouncy_shots", 0) > 0 else "normal"
+                            if btype == "bouncy":
+                                player["bouncy_shots"] -= 1
+                            bullet = {
+                                "owner_id": client_id,
+                                "x": player["x"],
+                                "y": player["y"],
+                                "vx": math.cos(angle_rad) * 400,
+                                "vy": math.sin(angle_rad) * 400,
+                                "lifetime": 3.0,
+                                "btype": btype,
+                                "bounces": 0,
+                            }
+                            self.game_state["bullets"].append(bullet)
                         player["shot_cooldown"] = True
-                        player["cooldown_timer"] = 0.5
+                        player["cooldown_timer"] = 0.4
 
                     # Update cooldown
                     if player.get("shot_cooldown"):
@@ -502,27 +629,59 @@ class GameServer:
                     bullet["y"] += bullet["vy"] * dt
                     bullet["lifetime"] -= dt
 
-                    # Remove if out of bounds or lifetime expired
+                    # Remove if out of bounds or lifetime expired.
+                    # Bouncy bullets with remaining bounces are NOT removed here —
+                    # the wall-bounce block below will reflect them first.
+                    can_bounce = (bullet.get("btype") == "bouncy" and
+                                  bullet.get("bounces", 0) < BOUNCY_MAX_BOUNCES)
                     if (bullet["lifetime"] <= 0 or
-                        bullet["x"] < 0 or bullet["x"] > 800 or
-                            bullet["y"] < 0 or bullet["y"] > 600):
+                        (not can_bounce and (
+                            bullet["x"] < 0 or bullet["x"] > MAP_W or
+                            bullet["y"] < 0 or bullet["y"] > MAP_H))):
                         bullets_to_remove.append(i)
                         continue
 
-                    # Check collision with obstacles (bullet destroyed on hit)
+                    # Check collision with obstacles
                     hit_obstacle = False
                     for obs in self.obstacles:
-                        if (obs["x"] <= bullet["x"] <= obs["x"] + obs["w"] and
-                                obs["y"] <= bullet["y"] <= obs["y"] + obs["h"]):
-                            bullets_to_remove.append(i)
-                            hit_obstacle = True
+                        ox, oy, ow, oh = obs["x"], obs["y"], obs["w"], obs["h"]
+                        if (ox <= bullet["x"] <= ox + ow and
+                                oy <= bullet["y"] <= oy + oh):
+                            if bullet.get("btype") == "bouncy" and bullet.get("bounces", 0) < BOUNCY_MAX_BOUNCES:
+                                # Determine which axis to reflect on
+                                # Push bullet out and flip velocity
+                                over_l = bullet["x"] - ox
+                                over_r = ox + ow - bullet["x"]
+                                over_t = bullet["y"] - oy
+                                over_b = oy + oh - bullet["y"]
+                                mn = min(over_l, over_r, over_t, over_b)
+                                if mn in (over_l, over_r):
+                                    bullet["vx"] *= -1
+                                    bullet["x"] += -5 if mn == over_l else 5
+                                else:
+                                    bullet["vy"] *= -1
+                                    bullet["y"] += -5 if mn == over_t else 5
+                                bullet["bounces"] = bullet.get(
+                                    "bounces", 0) + 1
+                            else:
+                                bullets_to_remove.append(i)
+                                hit_obstacle = True
                             break
                     if hit_obstacle:
                         continue
 
                     # Check collision with players
                     for pid, player in self.players.items():
-                        if pid == bullet["owner_id"] or not player.get("alive", True):
+                        is_shooter = pid == bullet["owner_id"]
+                        if is_shooter:
+                            # Normal/laser bullets never hurt the shooter.
+                            # Bouncy bullets only hurt the shooter after ≥1 bounce
+                            # so the bullet can't self-hit the instant it's fired.
+                            if bullet.get("btype") != "bouncy":
+                                continue
+                            if bullet.get("bounces", 0) < 1:
+                                continue
+                        if not player.get("alive", True):
                             continue
 
                         # Simple circle collision
@@ -530,16 +689,85 @@ class GameServer:
                         dy = bullet["y"] - player["y"]
                         dist_sq = dx*dx + dy*dy
                         if dist_sq < (15 + 5) ** 2:  # player radius + bullet radius
-                            player["health"] -= 1
-                            if player["health"] <= 0:
-                                player["alive"] = False
-                                player["health"] = 0
+                            if player.get("shield", 0) > 0:
+                                # shield absorbs the hit
+                                player["shield"] -= 1
+                            else:
+                                player["health"] -= 1
+                                if player["health"] <= 0:
+                                    player["alive"] = False
+                                    player["health"] = 0
                             bullets_to_remove.append(i)
                             break
+
+                # Bouncy bullets bounce off walls
+                for bullet in self.game_state["bullets"]:
+                    if bullet.get("btype") != "bouncy":
+                        continue
+                    bounces = bullet.get("bounces", 0)
+                    if bounces >= BOUNCY_MAX_BOUNCES:
+                        continue
+                    reflected = False
+                    if bullet["x"] <= 0 or bullet["x"] >= MAP_W:
+                        bullet["vx"] *= -1
+                        bullet["x"] = max(1, min(MAP_W - 1, bullet["x"]))
+                        reflected = True
+                    if bullet["y"] <= 0 or bullet["y"] >= MAP_H:
+                        bullet["vy"] *= -1
+                        bullet["y"] = max(1, min(MAP_H - 1, bullet["y"]))
+                        reflected = True
+                    if reflected:
+                        bullet["bounces"] = bounces + 1
 
                 # Remove bullets
                 for i in sorted(bullets_to_remove, reverse=True):
                     self.game_state["bullets"].pop(i)
+
+                # Decay laser lifetime
+                self.game_state["lasers"] = [
+                    la for la in self.game_state["lasers"]
+                    if la["lifetime"] - dt > 0
+                ]
+                for la in self.game_state["lasers"]:
+                    la["lifetime"] -= dt
+
+                # ── Crate spawning ──
+                self._crate_spawn_timer -= dt
+                if (self._crate_spawn_timer <= 0 and
+                        len(self._crates) < MAX_CRATES and
+                        self.game_started):
+                    pos = _crate_spawn_pos(self.obstacles)
+                    if pos:
+                        cid = self._next_crate_id
+                        self._next_crate_id += 1
+                        ctype = random.choice(CRATE_TYPES)
+                        self._crates[cid] = {
+                            "id": cid, "x": float(pos[0]), "y": float(pos[1]),
+                            "ctype": ctype, "lifetime": CRATE_LIFETIME,
+                        }
+                    self._crate_spawn_timer = CRATE_SPAWN_INTERVAL
+
+                # ── Crate lifetime & pickup ──
+                expired_crates = []
+                for cid, crate in list(self._crates.items()):
+                    crate["lifetime"] -= dt
+                    if crate["lifetime"] <= 0:
+                        expired_crates.append(cid)
+                        continue
+                    for player in self.players.values():
+                        if not player.get("alive", True):
+                            continue
+                        dx = player["x"] - crate["x"]
+                        dy = player["y"] - crate["y"]
+                        if dx * dx + dy * dy < CRATE_PICKUP_RADIUS ** 2:
+                            _apply_crate(crate["ctype"], player)
+                            expired_crates.append(cid)
+                            break
+                for cid in expired_crates:
+                    self._crates.pop(cid, None)
+
+                # Build crate list for broadcast
+                self.game_state["crates"] = list(self._crates.values())
 
                 # Update game state to clients
                 self.game_state["players"] = dict(self.players)
