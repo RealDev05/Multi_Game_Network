@@ -90,6 +90,36 @@ class Bullet:
                            (int(self.x), int(self.y)), self.radius)
 
 
+class Obstacle:
+    """Represents a static rectangular obstacle."""
+
+    def __init__(self, x, y, w, h):
+        self.x = x
+        self.y = y
+        self.w = w
+        self.h = h
+        self.rect = pygame.Rect(x, y, w, h)
+
+    def draw(self, surface):
+        """Draw the obstacle as a stone-like block with bevelled edges."""
+        # Main fill
+        pygame.draw.rect(surface, (75, 75, 85), self.rect)
+        # Top-left highlight
+        pygame.draw.line(surface, (115, 115, 128),
+                         (self.x, self.y), (self.x + self.w - 1, self.y), 2)
+        pygame.draw.line(surface, (115, 115, 128),
+                         (self.x, self.y), (self.x, self.y + self.h - 1), 2)
+        # Bottom-right shadow
+        pygame.draw.line(surface, (38, 38, 46),
+                         (self.x + self.w, self.y),
+                         (self.x + self.w, self.y + self.h), 2)
+        pygame.draw.line(surface, (38, 38, 46),
+                         (self.x, self.y + self.h),
+                         (self.x + self.w, self.y + self.h), 2)
+        # Thin outer border
+        pygame.draw.rect(surface, (52, 52, 62), self.rect, 1)
+
+
 def draw_text(surface, text, pos, font, color=(255, 255, 255), center=False):
     """Helper function to draw text."""
     text_surface = font.render(text, True, color)
