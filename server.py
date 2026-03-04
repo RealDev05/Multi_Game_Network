@@ -7,8 +7,150 @@ import socket
 import threading
 import json
 import time
+import math
+import random
+from collections import deque
 from typing import Dict
 from protocol import MessageType, encode_message, decode_message
+
+# ── Obstacle generation constants ──────────────────────────────────────────────
+MAP_W, MAP_H = 800, 600
+PLAYER_RADIUS = 15
+OBS_MIN_W, OBS_MAX_W = 40, 120
+OBS_MIN_H, OBS_MAX_H = 40, 100
+OBS_WALL_MARGIN = 30    # obstacles stay at least this far from every wall
+OBS_GAP = 30    # minimum clear gap between any two obstacles
+OBS_CLEAR_RADIUS = 70    # no obstacle within this px radius of any spawn point
+MAX_OBS_COVERAGE = 0.20  # obstacles may cover at most this fraction of map area
+MAX_OBSTACLES = 20
+MAX_FAILURES = 300   # consecutive placement failures before giving up
+BFS_CELL = 20    # grid cell size for BFS connectivity check
+
+# Spread-out spawn positions kept clear of obstacles
+SPAWN_POSITIONS = [
+    (100, 100), (700, 100), (100, 500), (700, 500),
+    (400,  80), (400, 520), (80, 300), (720, 300),
+    (250, 200), (550, 400),
+]
+
+
+# ── Obstacle generation helpers ─────────────────────────────────────────────────
+
+def _build_blocked_grid(obstacles):
+    """Return (blocked[col][row], cols, rows).
+    A cell is blocked if a player circle centred there would touch a wall or obstacle."""
+    cols = MAP_W // BFS_CELL
+    rows = MAP_H // BFS_CELL
+    blocked = [[False] * rows for _ in range(cols)]
+    for c in range(cols):
+        for r in range(rows):
+            cx = c * BFS_CELL + BFS_CELL // 2
+            cy = r * BFS_CELL + BFS_CELL // 2
+            # Wall clearance
+            if cx < PLAYER_RADIUS or cx > MAP_W - PLAYER_RADIUS:
+                blocked[c][r] = True
+                continue
+            if cy < PLAYER_RADIUS or cy > MAP_H - PLAYER_RADIUS:
+                blocked[c][r] = True
+                continue
+            # Obstacle clearance — circle-vs-rect distance
+            for ox, oy, ow, oh in obstacles:
+                clx = max(ox, min(cx, ox + ow))
+                cly = max(oy, min(cy, oy + oh))
+                if (cx - clx) ** 2 + (cy - cly) ** 2 < PLAYER_RADIUS ** 2:
+                    blocked[c][r] = True
+                    break
+    return blocked, cols, rows
+
+
+def _is_map_connected(obstacles):
+    """BFS flood fill: True only if every passable cell is reachable from every other."""
+    blocked, cols, rows = _build_blocked_grid(obstacles)
+
+    start = None
+    free_count = 0
+    for c in range(cols):
+        for r in range(rows):
+            if not blocked[c][r]:
+                free_count += 1
+                if start is None:
+                    start = (c, r)
+
+    if start is None:
+        return False
+
+    visited = {start}
+    queue = deque([start])
+    while queue:
+        c, r = queue.popleft()
+        for dc, dr in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            nb = (c + dc, r + dr)
+            if (0 <= nb[0] < cols and 0 <= nb[1] < rows
+                    and nb not in visited and not blocked[nb[0]][nb[1]]):
+                visited.add(nb)
+                queue.append(nb)
+
+    return len(visited) == free_count
+
+
+def _obstacles_overlap(nx, ny, nw, nh, placed):
+    """True if candidate rect (with OBS_GAP clearance) overlaps any placed obstacle."""
+    for ox, oy, ow, oh in placed:
+        if (nx < ox + ow + OBS_GAP and nx + nw + OBS_GAP > ox and
+                ny < oy + oh + OBS_GAP and ny + nh + OBS_GAP > oy):
+            return True
+    return False
+
+
+def _near_spawn(nx, ny, nw, nh):
+    """True if any spawn point falls within OBS_CLEAR_RADIUS of the candidate rect."""
+    for sx, sy in SPAWN_POSITIONS:
+        clx = max(nx, min(sx, nx + nw))
+        cly = max(ny, min(sy, ny + nh))
+        if (sx - clx) ** 2 + (sy - cly) ** 2 < OBS_CLEAR_RADIUS ** 2:
+            return True
+    return False
+
+
+def generate_obstacles():
+    """
+    Randomly place rectangular obstacles subject to:
+      - BFS connectivity  : no enclosed region (walls included).
+      - Spawn clearance   : OBS_CLEAR_RADIUS around every SPAWN_POSITION.
+      - Inter-obstacle gap: OBS_GAP between every pair of rects.
+      - Wall margin       : OBS_WALL_MARGIN from every edge.
+      - Coverage cap      : <= MAX_OBS_COVERAGE of total map area.
+      - Count cap         : <= MAX_OBSTACLES rects.
+    Returns list of dicts {x, y, w, h}.
+    """
+    placed = []       # accepted (x, y, w, h) tuples
+    total_area = 0
+    max_area = MAP_W * MAP_H * MAX_OBS_COVERAGE
+    failures = 0
+
+    while len(placed) < MAX_OBSTACLES and failures < MAX_FAILURES and total_area < max_area:
+        w = random.randint(OBS_MIN_W, OBS_MAX_W)
+        h = random.randint(OBS_MIN_H, OBS_MAX_H)
+        x = random.randint(OBS_WALL_MARGIN, MAP_W - OBS_WALL_MARGIN - w)
+        y = random.randint(OBS_WALL_MARGIN, MAP_H - OBS_WALL_MARGIN - h)
+
+        if _obstacles_overlap(x, y, w, h, placed):
+            failures += 1
+            continue
+        if _near_spawn(x, y, w, h):
+            failures += 1
+            continue
+        if not _is_map_connected(placed + [(x, y, w, h)]):
+            failures += 1
+            continue
+
+        placed.append((x, y, w, h))
+        total_area += w * h
+        failures = 0   # reset consecutive-failure counter on success
+
+    print(f"Generated {len(placed)} obstacles "
+          f"({total_area / (MAP_W * MAP_H) * 100:.1f}% map coverage)")
+    return [{"x": x, "y": y, "w": w, "h": h} for x, y, w, h in placed]
 
 
 class GameServer:
@@ -47,6 +189,7 @@ class GameServer:
             "players": {},
             "bullets": []
         }
+        self.obstacles = []  # set once at game start by generate_obstacles()
 
         self.lock = threading.Lock()
 
@@ -123,11 +266,12 @@ class GameServer:
             self.next_client_id += 1
             self.clients[client_id] = client_socket
             color = self.get_next_color()
+            spawn_pos = SPAWN_POSITIONS[(client_id - 1) % len(SPAWN_POSITIONS)]
             self.players[client_id] = {
                 "id": client_id,
                 "color": color,
-                "x": 400,
-                "y": 300,
+                "x": float(spawn_pos[0]),
+                "y": float(spawn_pos[1]),
                 "angle": 0,
                 "health": 3,
                 "alive": True
@@ -292,7 +436,6 @@ class GameServer:
 
                     # Shooting
                     if player_input.get("shoot") and not player.get("shot_cooldown", False):
-                        import math
                         angle_rad = math.radians(player["angle"])
                         bullet = {
                             "owner_id": client_id,
@@ -320,6 +463,38 @@ class GameServer:
                     player["x"] = max(20, min(780, player["x"]))
                     player["y"] = max(20, min(580, player["y"]))
 
+                    # Resolve player-vs-obstacle collisions (circle push-out)
+                    px, py = player["x"], player["y"]
+                    for obs in self.obstacles:
+                        ox, oy, ow, oh = obs["x"], obs["y"], obs["w"], obs["h"]
+                        clx = max(ox, min(px, ox + ow))
+                        cly = max(oy, min(py, oy + oh))
+                        dx = px - clx
+                        dy = py - cly
+                        dist_sq = dx * dx + dy * dy
+                        if dist_sq == 0:
+                            # Centre is inside rect: push along shortest penetration axis
+                            over_l = px - ox + PLAYER_RADIUS
+                            over_r = ox + ow - px + PLAYER_RADIUS
+                            over_t = py - oy + PLAYER_RADIUS
+                            over_b = oy + oh - py + PLAYER_RADIUS
+                            mn = min(over_l, over_r, over_t, over_b)
+                            if mn == over_l:
+                                px -= over_l
+                            elif mn == over_r:
+                                px += over_r
+                            elif mn == over_t:
+                                py -= over_t
+                            else:
+                                py += over_b
+                        elif dist_sq < PLAYER_RADIUS * PLAYER_RADIUS:
+                            dist = math.sqrt(dist_sq)
+                            overlap = PLAYER_RADIUS - dist
+                            px += (dx / dist) * overlap
+                            py += (dy / dist) * overlap
+                    player["x"] = max(20, min(780, px))
+                    player["y"] = max(20, min(580, py))
+
                 # Update bullets
                 bullets_to_remove = []
                 for i, bullet in enumerate(self.game_state["bullets"]):
@@ -332,6 +507,17 @@ class GameServer:
                         bullet["x"] < 0 or bullet["x"] > 800 or
                             bullet["y"] < 0 or bullet["y"] > 600):
                         bullets_to_remove.append(i)
+                        continue
+
+                    # Check collision with obstacles (bullet destroyed on hit)
+                    hit_obstacle = False
+                    for obs in self.obstacles:
+                        if (obs["x"] <= bullet["x"] <= obs["x"] + obs["w"] and
+                                obs["y"] <= bullet["y"] <= obs["y"] + obs["h"]):
+                            bullets_to_remove.append(i)
+                            hit_obstacle = True
+                            break
+                    if hit_obstacle:
                         continue
 
                     # Check collision with players
@@ -383,9 +569,10 @@ class GameServer:
             if not (len(self.ready_players) == len(self.players) and len(self.players) > 1):
                 return False
             self.game_started = True
-        # Lock released before broadcast to avoid deadlock (broadcast also acquires the lock)
+        # Generate obstacles outside the lock (CPU work + avoids broadcast deadlock)
+        self.obstacles = generate_obstacles()
         print("Game starting!")
-        self.broadcast(MessageType.GAME_START, {})
+        self.broadcast(MessageType.GAME_START, {"obstacles": self.obstacles})
         return True
 
     def stop(self):

@@ -9,7 +9,7 @@ import sys
 import math
 import select
 from protocol import MessageType, encode_message, decode_message
-from entities import Player, Bullet, draw_text
+from entities import Player, Bullet, Obstacle, draw_text
 
 
 class GameState:
@@ -56,13 +56,16 @@ class GameClient:
 
         # Bullets
         self.bullets = []
+        self.obstacles = []
 
-        # Input state
+        # Input state — polled each frame via pygame.key.get_pressed()
         self.keys_down = {
             "w": False, "a": False, "s": False, "d": False,
             "left": False, "right": False, "shoot": False
         }
         self.last_input_sent = None
+        # counts down; when 0, force a resend regardless of change
+        self.input_force_resend = 0
 
         # Network buffer
         self.receive_buffer = b""
@@ -160,6 +163,10 @@ class GameClient:
             self.ready_players.add(client_id)
 
         elif msg_type == MessageType.GAME_START:
+            obstacles_data = data.get("obstacles", [])
+            self.obstacles = [
+                Obstacle(o["x"], o["y"], o["w"], o["h"]) for o in obstacles_data
+            ]
             self.state = GameState.GAME
 
         elif msg_type == MessageType.GAME_OVER:
@@ -204,21 +211,24 @@ class GameClient:
         self.send_message(MessageType.READY)
 
     def send_input(self):
-        """Send input state to server."""
+        """Poll keyboard state and send to server; force-resend every 15 frames to self-heal desyncs."""
+        keys = pygame.key.get_pressed()
         input_data = {
-            "w": self.keys_down["w"],
-            "a": self.keys_down["a"],
-            "s": self.keys_down["s"],
-            "d": self.keys_down["d"],
-            "left": self.keys_down["left"],
-            "right": self.keys_down["right"],
-            "shoot": self.keys_down["shoot"]
+            "w":     bool(keys[pygame.K_w]),
+            "a":     bool(keys[pygame.K_a]),
+            "s":     bool(keys[pygame.K_s]),
+            "d":     bool(keys[pygame.K_d]),
+            "left":  bool(keys[pygame.K_LEFT]),
+            "right": bool(keys[pygame.K_RIGHT]),
+            "shoot": bool(keys[pygame.K_SPACE]),
         }
 
-        # Only send if changed
-        if input_data != self.last_input_sent:
+        self.input_force_resend -= 1
+        if input_data != self.last_input_sent or self.input_force_resend <= 0:
             self.send_message(MessageType.PLAYER_INPUT, input_data)
             self.last_input_sent = input_data.copy()
+            # re-sync server every 15 frames (~4x/sec at 60fps)
+            self.input_force_resend = 15
 
     def draw_menu(self):
         """Draw the main menu."""
@@ -348,6 +358,10 @@ class GameClient:
         """Draw the game screen."""
         self.screen.fill((40, 40, 60))
 
+        # Draw obstacles first (beneath players and bullets)
+        for obstacle in self.obstacles:
+            obstacle.draw(self.screen)
+
         # Draw all players
         for player in self.players.values():
             player.draw(self.screen)
@@ -453,39 +467,8 @@ class GameClient:
                         elif event.unicode:
                             self.handle_text_input(event.unicode)
 
-                    elif self.state == GameState.GAME:
-                        # Game controls
-                        if event.key == pygame.K_w:
-                            self.keys_down["w"] = True
-                        elif event.key == pygame.K_a:
-                            self.keys_down["a"] = True
-                        elif event.key == pygame.K_s:
-                            self.keys_down["s"] = True
-                        elif event.key == pygame.K_d:
-                            self.keys_down["d"] = True
-                        elif event.key == pygame.K_LEFT:
-                            self.keys_down["left"] = True
-                        elif event.key == pygame.K_RIGHT:
-                            self.keys_down["right"] = True
-                        elif event.key == pygame.K_SPACE:
-                            self.keys_down["shoot"] = True
-
                 elif event.type == pygame.KEYUP:
-                    if self.state == GameState.GAME:
-                        if event.key == pygame.K_w:
-                            self.keys_down["w"] = False
-                        elif event.key == pygame.K_a:
-                            self.keys_down["a"] = False
-                        elif event.key == pygame.K_s:
-                            self.keys_down["s"] = False
-                        elif event.key == pygame.K_d:
-                            self.keys_down["d"] = False
-                        elif event.key == pygame.K_LEFT:
-                            self.keys_down["left"] = False
-                        elif event.key == pygame.K_RIGHT:
-                            self.keys_down["right"] = False
-                        elif event.key == pygame.K_SPACE:
-                            self.keys_down["shoot"] = False
+                    pass  # key state is polled via pygame.key.get_pressed() each frame
 
             # Render based on state
             if self.state == GameState.MENU:
