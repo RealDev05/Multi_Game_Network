@@ -358,13 +358,29 @@ class GameServer:
                 # Update game state to clients
                 self.game_state["players"] = dict(self.players)
 
+                # Check win condition: only 1 alive player remaining
+                alive = [pid for pid, p in self.players.items()
+                         if p.get("alive", True)]
+                if len(alive) == 1 and self.game_started:
+                    winner_id = alive[0]
+                    self.game_started = False
+                    winner_color = self.players[winner_id]["color"]
+                    print(f"Game over! Player {winner_id} wins!")
+                    self._pending_game_over = {
+                        "winner_id": winner_id, "winner_color": winner_color}
+
             # Broadcast game state
             self.broadcast(MessageType.GAME_STATE, self.game_state)
+
+            # Send game over outside the lock
+            if hasattr(self, '_pending_game_over') and self._pending_game_over:
+                self.broadcast(MessageType.GAME_OVER, self._pending_game_over)
+                self._pending_game_over = None
 
     def start_game(self):
         """Start the game."""
         with self.lock:
-            if not (len(self.ready_players) == len(self.players) and len(self.players) > 0):
+            if not (len(self.ready_players) == len(self.players) and len(self.players) > 1):
                 return False
             self.game_started = True
         # Lock released before broadcast to avoid deadlock (broadcast also acquires the lock)

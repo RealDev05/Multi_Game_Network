@@ -23,6 +23,7 @@ class MessageType(Enum):
     PLAYER_READY = "player_ready"
     GAME_START = "game_start"
     GAME_STATE = "game_state"
+    GAME_OVER = "game_over"
     CONNECTION_ACCEPTED = "connection_accepted"
 
 

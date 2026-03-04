@@ -17,6 +17,7 @@ class GameState:
     MENU = "menu"
     LOBBY = "lobby"
     GAME = "game"
+    GAME_OVER = "game_over"
 
 
 class GameClient:
@@ -65,6 +66,10 @@ class GameClient:
 
         # Network buffer
         self.receive_buffer = b""
+
+        # Game over
+        self.winner_id = None
+        self.winner_color = None
 
         # Host mode
         self.is_host = False
@@ -156,6 +161,12 @@ class GameClient:
 
         elif msg_type == MessageType.GAME_START:
             self.state = GameState.GAME
+
+        elif msg_type == MessageType.GAME_OVER:
+            self.winner_id = data.get("winner_id")
+            self.winner_color = tuple(
+                data.get("winner_color", (255, 255, 255)))
+            self.state = GameState.GAME_OVER
 
         elif msg_type == MessageType.GAME_STATE:
             # Update all players
@@ -298,13 +309,40 @@ class GameClient:
 
         # Host start button
         start_rect = None
-        if self.is_host and len(self.ready_players) == len(self.players) and len(self.players) > 0:
+        if self.is_host and len(self.ready_players) == len(self.players) and len(self.players) > 1:
             start_rect = pygame.Rect(250, 420, 300, 50)
             pygame.draw.rect(self.screen, (200, 100, 0), start_rect)
             draw_text(self.screen, "START GAME", (400, 440),
                       self.font_medium, center=True)
 
         return ready_rect, start_rect
+
+    def draw_game_over(self):
+        """Draw the game over screen."""
+        self.screen.fill((10, 10, 20))
+
+        is_winner = (self.client_id == self.winner_id)
+
+        if is_winner:
+            draw_text(self.screen, "YOU WIN!", (400, 200),
+                      self.font_large, (255, 215, 0), center=True)
+        else:
+            draw_text(self.screen, "YOU LOST", (400, 200),
+                      self.font_large, (200, 50, 50), center=True)
+
+        # Show winner info
+        if self.winner_id is not None:
+            winner_label = "Winner:"
+            draw_text(self.screen, winner_label, (400, 300),
+                      self.font_medium, (200, 200, 200), center=True)
+            if self.winner_color:
+                pygame.draw.circle(
+                    self.screen, self.winner_color, (355, 350), 14)
+            draw_text(self.screen, f"Player {self.winner_id}", (380, 338), self.font_medium,
+                      self.winner_color if self.winner_color else (255, 255, 255))
+
+        draw_text(self.screen, "Close the window to exit.", (400, 430),
+                  self.font_small, (150, 150, 150), center=True)
 
     def draw_game(self):
         """Draw the game screen."""
@@ -459,6 +497,8 @@ class GameClient:
                 # Send input to server
                 if self.connected:
                     self.send_input()
+            elif self.state == GameState.GAME_OVER:
+                self.draw_game_over()
 
             pygame.display.flip()
             self.clock.tick(60)
