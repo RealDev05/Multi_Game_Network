@@ -79,6 +79,13 @@ class GameClient:
         # Host mode
         self.is_host = False
         self.server_process = None
+        self.map_size_choice = "small"  # host's chosen map size (set in lobby)
+
+        # Map dimensions — updated when GAME_START is received
+        self.map_w = 800
+        self.map_h = 600
+        # (w, h) set by receive thread, applied on main thread
+        self.pending_resize = None
 
     def connect_to_server(self, host, port):
         """Connect to game server."""
@@ -165,6 +172,11 @@ class GameClient:
             self.ready_players.add(client_id)
 
         elif msg_type == MessageType.GAME_START:
+            map_w = data.get("map_w", 800)
+            map_h = data.get("map_h", 600)
+            self.map_w = map_w
+            self.map_h = map_h
+            self.pending_resize = (map_w, map_h)   # applied on main thread
             obstacles_data = data.get("obstacles", [])
             self.obstacles = [
                 Obstacle(o["x"], o["y"], o["w"], o["h"]) for o in obstacles_data
@@ -344,6 +356,27 @@ class GameClient:
             draw_text(self.screen, "WAITING...", (400, 520),
                       self.font_medium, center=True)
 
+        # Map size selector (host only)
+        small_rect = medium_rect = large_rect = None
+        if self.is_host:
+            draw_text(self.screen, "Map Size:", (400, 355),
+                      self.font_small, (180, 180, 255), center=True)
+            for i, (label, key) in enumerate([("Small", "small"), ("Medium", "medium"), ("Large", "large")]):
+                r = pygame.Rect(155 + i * 165, 375, 150, 35)
+                col = (0, 160, 70) if self.map_size_choice == key else (
+                    55, 55, 85)
+                pygame.draw.rect(self.screen, col, r, border_radius=5)
+                pygame.draw.rect(self.screen, (180, 180, 255),
+                                 r, 2, border_radius=5)
+                draw_text(self.screen, label, r.center,
+                          self.font_small, center=True)
+                if key == "small":
+                    small_rect = r
+                elif key == "medium":
+                    medium_rect = r
+                else:
+                    large_rect = r
+
         # Host start button
         start_rect = None
         if self.is_host and len(self.ready_players) == len(self.players) and len(self.players) > 1:
@@ -352,33 +385,34 @@ class GameClient:
             draw_text(self.screen, "START GAME", (400, 440),
                       self.font_medium, center=True)
 
-        return ready_rect, start_rect
+        return ready_rect, start_rect, small_rect, medium_rect, large_rect
 
     def draw_game_over(self):
         """Draw the game over screen."""
         self.screen.fill((10, 10, 20))
 
         is_winner = (self.client_id == self.winner_id)
+        cx = self.map_w // 2
+        cy = self.map_h // 2
 
         if is_winner:
-            draw_text(self.screen, "YOU WIN!", (400, 200),
+            draw_text(self.screen, "YOU WIN!", (cx, cy - 100),
                       self.font_large, (255, 215, 0), center=True)
         else:
-            draw_text(self.screen, "YOU LOST", (400, 200),
+            draw_text(self.screen, "YOU LOST", (cx, cy - 100),
                       self.font_large, (200, 50, 50), center=True)
 
         # Show winner info
         if self.winner_id is not None:
-            winner_label = "Winner:"
-            draw_text(self.screen, winner_label, (400, 300),
+            draw_text(self.screen, "Winner:", (cx, cy),
                       self.font_medium, (200, 200, 200), center=True)
             if self.winner_color:
                 pygame.draw.circle(
-                    self.screen, self.winner_color, (355, 350), 14)
-            draw_text(self.screen, f"Player {self.winner_id}", (380, 338), self.font_medium,
+                    self.screen, self.winner_color, (cx - 45, cy + 50), 14)
+            draw_text(self.screen, f"Player {self.winner_id}", (cx - 20, cy + 38), self.font_medium,
                       self.winner_color if self.winner_color else (255, 255, 255))
 
-        draw_text(self.screen, "Close the window to exit.", (400, 430),
+        draw_text(self.screen, "Close the window to exit.", (cx, cy + 130),
                   self.font_small, (150, 150, 150), center=True)
 
     def draw_game(self):
@@ -423,7 +457,7 @@ class GameClient:
         if self.client_id in self.players:
             from entities import CRATE_COLORS, _draw_diamond
             p = self.players[self.client_id]
-            hud_x, hud_y = 10, 560
+            hud_x, hud_y = 10, self.map_h - 40
             hud_items = [
                 ("shield",  CRATE_COLORS["shield"],  p.shield),
                 ("laser",   CRATE_COLORS["laser"],   p.laser_shots),
@@ -469,13 +503,21 @@ class GameClient:
         elif port_rect2.collidepoint(pos):
             self.active_input = "join_port"
 
-    def handle_lobby_click(self, pos, ready_rect, start_rect):
+    def handle_lobby_click(self, pos, ready_rect, start_rect, small_rect, medium_rect, large_rect):
         """Handle mouse clicks in lobby."""
         if ready_rect and ready_rect.collidepoint(pos) and not self.is_ready:
             self.send_ready()
 
         if start_rect and start_rect.collidepoint(pos) and self.is_host:
-            self.send_message(MessageType.REQUEST_START)
+            self.send_message(MessageType.REQUEST_START, {
+                              "map_size": self.map_size_choice})
+
+        if small_rect and small_rect.collidepoint(pos):
+            self.map_size_choice = "small"
+        elif medium_rect and medium_rect.collidepoint(pos):
+            self.map_size_choice = "medium"
+        elif large_rect and large_rect.collidepoint(pos):
+            self.map_size_choice = "large"
 
     def handle_text_input(self, text):
         """Handle text input for menu fields."""
@@ -524,6 +566,9 @@ class GameClient:
                     pass  # key state is polled via pygame.key.get_pressed() each frame
 
             # Render based on state
+            if self.pending_resize is not None:
+                self.screen = pygame.display.set_mode(self.pending_resize)
+                self.pending_resize = None
             if self.state == GameState.MENU:
                 menu_rects = self.draw_menu()
             elif self.state == GameState.LOBBY:
