@@ -98,7 +98,7 @@ Crates spawn on the map periodically (up to 5 at once, every 8 seconds, 12-secon
 
 | Crate     | Label | Effect                                  | Rarity          |
 | --------- | ----- | --------------------------------------- | --------------- |
-| 🔴 Health | **H** | Restores 1 HP (max 3)                   | Rare (1-in-6)   |
+| 🔴 Health | **H** | Restores to full health (3 HP)          | Rare (1-in-6)   |
 | 🔵 Shield | **S** | Absorbs 1 hit (stackable up to 3)       | Common (1-in-3) |
 | 🟣 Laser  | **L** | Next shot is an instant laser beam      | Rare (1-in-6)   |
 | 🟢 Bouncy | **B** | Next 3 shots bounce off walls/obstacles | Common (1-in-3) |
@@ -108,7 +108,7 @@ Active power-ups are shown in the **bottom-left HUD** as colored diamond icons w
 #### Bullet Types
 
 - **Normal** — standard bullet, destroyed on obstacle hit
-- **Laser** — instant beam, hits the first player in line of sight
+- **Laser** — instant beam, hits **all** players in line of sight (passes through them)
 - **Bouncy** — reflects off walls and obstacles (up to 3 bounces); can hurt the shooter _after_ the first bounce
 
 ---
