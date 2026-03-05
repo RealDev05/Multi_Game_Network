@@ -26,6 +26,9 @@ class MessageType(Enum):
     GAME_OVER = "game_over"
     CONNECTION_ACCEPTED = "connection_accepted"
 
+    # UDP control (client→server over UDP to register address)
+    UDP_REGISTER = "udp_register"
+
 
 def encode_message(msg_type: MessageType, data: Dict[str, Any] = None) -> bytes:
     """Encode a message to send over the network."""
@@ -42,6 +45,23 @@ def decode_message(msg_bytes: bytes) -> tuple[MessageType, Dict[str, Any]]:
     """Decode a received message."""
     msg_str = msg_bytes.decode('utf-8').strip()
     message = json.loads(msg_str)
+    msg_type = MessageType(message["type"])
+    data = message.get("data", {})
+    return msg_type, data
+
+
+def encode_udp(msg_type: MessageType, data: Dict[str, Any] = None) -> bytes:
+    """Encode a message as a UDP datagram (no newline delimiter — datagrams are self-framed)."""
+    message = {
+        "type": msg_type.value,
+        "data": data or {}
+    }
+    return json.dumps(message).encode('utf-8')
+
+
+def decode_udp(raw: bytes) -> tuple[MessageType, Dict[str, Any]]:
+    """Decode a UDP datagram."""
+    message = json.loads(raw.decode('utf-8'))
     msg_type = MessageType(message["type"])
     data = message.get("data", {})
     return msg_type, data

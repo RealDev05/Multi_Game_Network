@@ -11,7 +11,7 @@ import math
 import random
 from collections import deque
 from typing import Dict
-from protocol import MessageType, encode_message, decode_message
+from protocol import MessageType, encode_message, decode_message, encode_udp, decode_udp
 
 # ── Obstacle generation constants ──────────────────────────────────────────────
 MAP_W, MAP_H = 800, 600
@@ -304,6 +304,12 @@ class GameServer:
         self._selected_map_size = "small"  # console-configurable before game start
         self._autostart = False            # auto-start when all players ready
 
+        # UDP game-data channel (opened in start())
+        self.udp_socket = None
+        self.udp_clients: Dict[int, tuple] = {}      # client_id -> (ip, port)
+        self._udp_addr_to_id: Dict[tuple, int] = {}  # (ip, port) -> client_id
+        self._udp_seq = 0                             # monotone broadcast sequence counter
+
     def start(self):
         """Start the server."""
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -315,8 +321,19 @@ class GameServer:
         self.server_socket.settimeout(1.0)
         self.running = True
 
-        print(f"Server started on port {self.port}")
+        # UDP socket on the same port number as TCP (they are independent protocols)
+        self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.udp_socket.bind((self.host, self.port))
+        self.udp_socket.settimeout(1.0)
+
+        print(f"Server started on port {self.port} (TCP + UDP)")
         print(f"Players can connect using this address")
+
+        # Start UDP receive thread
+        udp_recv_thread = threading.Thread(target=self._udp_receive_loop)
+        udp_recv_thread.daemon = True
+        udp_recv_thread.start()
 
         # Start accepting connections
         accept_thread = threading.Thread(target=self.accept_connections)
@@ -347,6 +364,39 @@ class GameServer:
             except Exception as e:
                 if self.running:
                     print(f"Error accepting connection: {e}")
+
+    def _udp_receive_loop(self):
+        """Receive UDP datagrams: client registrations and player input."""
+        while self.running:
+            try:
+                data, addr = self.udp_socket.recvfrom(65535)
+                try:
+                    msg_type, msg_data = decode_udp(data)
+                except Exception as e:
+                    print(f"UDP decode error from {addr}: {e}")
+                    continue
+
+                if msg_type == MessageType.UDP_REGISTER:
+                    cid = msg_data.get("client_id")
+                    if cid and cid in self.players:
+                        with self.lock:
+                            self.udp_clients[cid] = addr
+                            self._udp_addr_to_id[addr] = cid
+                        print(f"Client {cid} registered UDP from {addr}")
+
+                elif msg_type == MessageType.PLAYER_INPUT:
+                    # Identify the client by their registered UDP address (prevents spoofing)
+                    with self.lock:
+                        cid = self._udp_addr_to_id.get(addr)
+                    if cid:
+                        self.process_message(
+                            cid, MessageType.PLAYER_INPUT, msg_data)
+
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if self.running:
+                    print(f"UDP receive error: {e}")
 
     def get_next_color(self):
         """Get the next available unique color."""
@@ -401,7 +451,8 @@ class GameServer:
             # Send connection accepted message
             msg = encode_message(MessageType.CONNECTION_ACCEPTED, {
                 "client_id": client_id,
-                "color": color
+                "color": color,
+                "udp_port": self.port,
             })
             client_socket.send(msg)
 
@@ -523,6 +574,32 @@ class GameServer:
             # Remove dead clients
             for client_id in dead_clients:
                 self.remove_client(client_id)
+
+    def broadcast_udp(self, game_state_data):
+        """Send GAME_STATE via UDP to registered clients; TCP fallback for unregistered."""
+        self._udp_seq += 1
+        payload = dict(game_state_data)   # shallow copy so we can add 'seq'
+        payload["seq"] = self._udp_seq
+        raw = encode_udp(MessageType.GAME_STATE, payload)
+        tcp_msg = encode_message(MessageType.GAME_STATE, payload)
+
+        with self.lock:
+            dead = []
+            for cid, sock in list(self.clients.items()):
+                if cid in self.udp_clients:
+                    try:
+                        self.udp_socket.sendto(raw, self.udp_clients[cid])
+                    except Exception as e:
+                        print(f"UDP send error to client {cid}: {e}")
+                else:
+                    # Client hasn't completed UDP registration yet — fall back to TCP
+                    try:
+                        sock.send(tcp_msg)
+                    except Exception as e:
+                        print(f"TCP fallback error to client {cid}: {e}")
+                        dead.append(cid)
+            for cid in dead:
+                self.remove_client(cid)
 
     def game_loop(self):
         """Main game loop for updating game state."""
@@ -819,8 +896,8 @@ class GameServer:
                     self._pending_game_over = {
                         "winner_id": winner_id, "winner_color": winner_color}
 
-            # Broadcast game state
-            self.broadcast(MessageType.GAME_STATE, self.game_state)
+            # Broadcast game state via UDP (falls back to TCP for unregistered clients)
+            self.broadcast_udp(self.game_state)
 
             # Send game over outside the lock
             if hasattr(self, '_pending_game_over') and self._pending_game_over:
@@ -868,6 +945,11 @@ class GameServer:
         if self.server_socket:
             try:
                 self.server_socket.close()
+            except:
+                pass
+        if self.udp_socket:
+            try:
+                self.udp_socket.close()
             except:
                 pass
 

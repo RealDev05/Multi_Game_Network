@@ -8,7 +8,7 @@ import threading
 import sys
 import math
 import select
-from protocol import MessageType, encode_message, decode_message
+from protocol import MessageType, encode_message, decode_message, encode_udp, decode_udp
 from entities import Player, Bullet, Obstacle, Crate, LaserBeam, draw_text
 
 
@@ -45,10 +45,17 @@ class GameClient:
         self.client_id = None
         self.my_color = None
 
+        # UDP fast path (opened after CONNECTION_ACCEPTED)
+        self.udp_socket = None
+        self.udp_server_addr = None   # (host, udp_port) — UDP send destination
+        self._udp_host = None          # host string saved from connect_to_server()
+        self._udp_seq = -1             # last received UDP sequence number
+
         # Input buffers for menu
         self.input_buffer = {"host": "5001",
                              "join_ip": "localhost", "join_port": "5001"}
         self.active_input = None
+        self.input_select_all = False
 
         # Players
         self.players = {}  # player_id -> Player object
@@ -91,6 +98,7 @@ class GameClient:
     def connect_to_server(self, host, port):
         """Connect to game server."""
         try:
+            self._udp_host = host
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.socket.connect((host, port))
             self.connected = True
@@ -135,6 +143,26 @@ class GameClient:
         print("Disconnected from server.")
         self.connected = False
 
+    def udp_receive_loop(self):
+        """Receive UDP game-state datagrams from the server (fast path)."""
+        self.udp_socket.settimeout(1.0)
+        while self.connected:
+            try:
+                raw, _ = self.udp_socket.recvfrom(65535)
+                msg_type, msg_data = decode_udp(raw)
+                if msg_type == MessageType.GAME_STATE:
+                    seq = msg_data.pop("seq", 0)
+                    if seq > self._udp_seq:
+                        self._udp_seq = seq
+                        self.process_message(msg_type, msg_data)
+                    # else: stale / out-of-order datagram — discard
+            except socket.timeout:
+                continue
+            except Exception as e:
+                if self.connected:
+                    print(f"UDP receive error: {e}")
+                break
+
     def process_message(self, msg_type: MessageType, data: dict):
         """Process a message from the server."""
         if msg_type == MessageType.CONNECTION_ACCEPTED:
@@ -143,6 +171,18 @@ class GameClient:
             self.state = GameState.LOBBY
             print(
                 f"Connected as player {self.client_id} with color {self.my_color}")
+
+            # Open UDP channel on the same port the server listed
+            udp_port = data.get("udp_port", 5001)
+            self.udp_server_addr = (self._udp_host, udp_port)
+            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            reg_pkt = encode_udp(MessageType.UDP_REGISTER, {
+                                 "client_id": self.client_id})
+            self.udp_socket.sendto(reg_pkt, self.udp_server_addr)
+            udp_thread = threading.Thread(target=self.udp_receive_loop)
+            udp_thread.daemon = True
+            udp_thread.start()
+            print(f"UDP channel opened → {self.udp_server_addr}")
 
         elif msg_type == MessageType.PLAYER_JOINED:
             player_data = data["player"]
@@ -265,7 +305,17 @@ class GameClient:
 
         self.input_force_resend -= 1
         if input_data != self.last_input_sent or self.input_force_resend <= 0:
-            self.send_message(MessageType.PLAYER_INPUT, input_data)
+            if self.udp_socket and self.udp_server_addr:
+                # Fast path: fire-and-forget over UDP
+                try:
+                    raw = encode_udp(MessageType.PLAYER_INPUT, input_data)
+                    self.udp_socket.sendto(raw, self.udp_server_addr)
+                except Exception as e:
+                    print(f"UDP input send error: {e}")
+                    self.send_message(MessageType.PLAYER_INPUT, input_data)
+            else:
+                # Fallback: TCP (e.g. UDP not yet ready)
+                self.send_message(MessageType.PLAYER_INPUT, input_data)
             self.last_input_sent = input_data.copy()
             # re-sync server every 15 frames (~4x/sec at 60fps)
             self.input_force_resend = 15
@@ -631,6 +681,11 @@ class GameClient:
         # Cleanup
         if self.connected and self.socket:
             self.socket.close()
+        if self.udp_socket:
+            try:
+                self.udp_socket.close()
+            except Exception:
+                pass
         if self.is_host and self.server_process:
             self.server_process.terminate()
         pygame.quit()
