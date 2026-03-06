@@ -137,9 +137,16 @@ The host selects the map size in the lobby (or via the `map` command on a dedica
 
 ## Architecture
 
-Client-server over TCP with newline-delimited JSON messages:
+Hybrid **TCP + UDP** networking:
+
+| Channel                       | Protocol | Used for                                                                                 |
+| ----------------------------- | -------- | ---------------------------------------------------------------------------------------- |
+| Lobby, handshake, events      | **TCP**  | `PLAYER_JOINED/LEFT/READY`, `GAME_START`, `GAME_OVER`, disconnect — must arrive reliably |
+| Game state broadcasts (60 Hz) | **UDP**  | `GAME_STATE` — stale frames are worthless, so drop-and-skip is correct                   |
+| Player input (60 Hz)          | **UDP**  | `PLAYER_INPUT` — latest input is all that matters                                        |
 
 - The **server** is authoritative for all physics, collision detection, bullet movement, crate spawning, and win conditions
-- **Clients** send keyboard input each frame and receive the full game state at 60 FPS to render
+- **Clients** send keyboard input each frame via UDP and receive the full game state at 60 FPS via UDP; a sequence-number guard discards out-of-order/duplicate datagrams
+- Every UDP input packet embeds the sender's `client_id` so the server can refresh its NAT mapping if a client's public port changes after a long lobby wait
 - The host client auto-starts a local `server.py` subprocess; a dedicated server can also be run independently
-- Input uses `pygame.key.get_pressed()` polling with a force-resend every 15 frames to self-heal desyncs
+- The server opens **one TCP socket and one UDP socket on the same port number**; clients connect TCP first, then open a UDP socket and send a registration packet so the server learns their UDP address
