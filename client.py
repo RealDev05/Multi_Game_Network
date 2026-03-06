@@ -176,6 +176,8 @@ class GameClient:
             udp_port = data.get("udp_port", 5001)
             self.udp_server_addr = (self._udp_host, udp_port)
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # lock in a fixed local port so the source addr never changes
+            self.udp_socket.bind(("", 0))
             reg_pkt = encode_udp(MessageType.UDP_REGISTER, {
                                  "client_id": self.client_id})
             self.udp_socket.sendto(reg_pkt, self.udp_server_addr)
@@ -306,9 +308,13 @@ class GameClient:
         self.input_force_resend -= 1
         if input_data != self.last_input_sent or self.input_force_resend <= 0:
             if self.udp_socket and self.udp_server_addr:
-                # Fast path: fire-and-forget over UDP
+                # Fast path: fire-and-forget over UDP.
+                # Always embed _cid so the server can re-map our address if the
+                # NAT entry expired during lobby wait.
+                udp_input = dict(input_data)
+                udp_input["_cid"] = self.client_id
                 try:
-                    raw = encode_udp(MessageType.PLAYER_INPUT, input_data)
+                    raw = encode_udp(MessageType.PLAYER_INPUT, udp_input)
                     self.udp_socket.sendto(raw, self.udp_server_addr)
                 except Exception as e:
                     print(f"UDP input send error: {e}")

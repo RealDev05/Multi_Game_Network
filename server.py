@@ -385,10 +385,23 @@ class GameServer:
                         print(f"Client {cid} registered UDP from {addr}")
 
                 elif msg_type == MessageType.PLAYER_INPUT:
-                    # Identify the client by their registered UDP address (prevents spoofing)
+                    # Identify by address; if the NAT entry expired and the address
+                    # changed, re-map using the embedded _cid field.
                     with self.lock:
                         cid = self._udp_addr_to_id.get(addr)
+                        if cid is None:
+                            claimed = msg_data.get("_cid")
+                            if claimed and claimed in self.players:
+                                # Evict the stale addr entry for this client if present
+                                old_addr = self.udp_clients.get(claimed)
+                                if old_addr and old_addr != addr:
+                                    self._udp_addr_to_id.pop(old_addr, None)
+                                self.udp_clients[claimed] = addr
+                                self._udp_addr_to_id[addr] = claimed
+                                cid = claimed
                     if cid:
+                        # Strip the internal field before passing to game logic
+                        msg_data.pop("_cid", None)
                         self.process_message(
                             cid, MessageType.PLAYER_INPUT, msg_data)
 
