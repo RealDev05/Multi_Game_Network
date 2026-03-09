@@ -209,11 +209,16 @@ class Bullet:
         self.radius = 5
 
     def draw(self, surface):
-        """Draw the bullet; bouncy bullets are green."""
+        """Draw the bullet with a black outline and white centre dot for visibility."""
         color = CRATE_COLORS["bouncy"] if self.btype == "bouncy" else (
             255, 220, 0)
-        pygame.draw.circle(surface, color,
-                           (int(self.x), int(self.y)), self.radius)
+        pos = (int(self.x), int(self.y))
+        pygame.draw.circle(surface, (0, 0, 0),    pos,
+                           self.radius + 2)  # dark outline
+        pygame.draw.circle(surface, color,         pos,
+                           self.radius)      # filled core
+        pygame.draw.circle(surface, (255, 255, 255), pos,
+                           2)              # white highlight
 
 
 class Obstacle:

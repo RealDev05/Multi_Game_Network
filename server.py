@@ -706,6 +706,13 @@ class GameServer:
         while self.running:
             time.sleep(dt)
 
+            # Send delayed game-over outside any guard so game_started=False doesn't skip it
+            if self._pending_game_over and time.time() >= self._pending_game_over["send_at"]:
+                payload = {k: v for k, v in self._pending_game_over.items()
+                           if k != "send_at"}
+                self.broadcast(MessageType.GAME_OVER, payload)
+                self._pending_game_over = None
+
             with self.lock:
                 if not self.game_started:
                     # Check if we can start the game
@@ -992,15 +999,11 @@ class GameServer:
                     winner_color = self.players[winner_id]["color"]
                     print(f"Game over! Player {winner_id} wins!")
                     self._pending_game_over = {
-                        "winner_id": winner_id, "winner_color": winner_color}
+                        "winner_id": winner_id, "winner_color": winner_color,
+                        "send_at": time.time() + 2.0}
 
             # Broadcast game state via UDP (falls back to TCP for unregistered clients)
             self.broadcast_udp(self.game_state)
-
-            # Send game over outside the lock
-            if hasattr(self, '_pending_game_over') and self._pending_game_over:
-                self.broadcast(MessageType.GAME_OVER, self._pending_game_over)
-                self._pending_game_over = None
 
     def start_game(self, map_size=None):
         """Start the game."""
