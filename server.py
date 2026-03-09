@@ -36,11 +36,17 @@ _SB_STEP_Y = int(_SB_H * 0.75)   # 25 px
 _SB_OFFSET_X = _SB_STEP_X // 2   # 18 px
 OBS_WALL_MARGIN = 30    # obstacles stay at least this far from every wall
 OBS_GAP = 30    # minimum clear gap between any two obstacles
-OBS_CLEAR_RADIUS = 70    # no obstacle within this px radius of any spawn point
+OBS_CLEAR_RADIUS = 50    # no obstacle within this px radius of an *active* spawn point
 MAX_OBS_COVERAGE = 0.20  # obstacles may cover at most this fraction of map area
 MAX_OBSTACLES = 20
 MAX_FAILURES = 300   # consecutive placement failures before giving up
 BFS_CELL = 20    # grid cell size for BFS connectivity check
+# Zone-biased placement: map is split into ZONE_COLS × ZONE_ROWS cells.
+# Each zone must receive MIN_PER_ZONE obstacles before global fill begins.
+ZONE_COLS = 3
+ZONE_ROWS = 2
+MIN_PER_ZONE = 1      # guaranteed minimum obstacles per zone
+ZONE_ATTEMPTS = 150   # max random tries per zone during the seeding phase
 
 
 def _make_spawn_positions(w, h):
@@ -141,9 +147,9 @@ def _obstacles_overlap(nx, ny, nw, nh, placed):
     return False
 
 
-def _near_spawn(nx, ny, nw, nh):
-    """True if any spawn point falls within OBS_CLEAR_RADIUS of the candidate rect."""
-    for sx, sy in SPAWN_POSITIONS:
+def _near_spawn(nx, ny, nw, nh, active_spawns):
+    """True if any *active* spawn point falls within OBS_CLEAR_RADIUS of the candidate rect."""
+    for sx, sy in active_spawns:
         clx = max(nx, min(sx, nx + nw))
         cly = max(ny, min(sy, ny + nh))
         if (sx - clx) ** 2 + (sy - cly) ** 2 < OBS_CLEAR_RADIUS ** 2:
@@ -254,41 +260,79 @@ def _decompose_to_strips(placed):
     return strips
 
 
-def generate_obstacles():
+def _try_place_in_zone(zone_col, zone_row, placed, active_spawns):
+    """Try ZONE_ATTEMPTS times to place one obstacle randomly within the given zone.
+    Returns updated placed list on success, or None on failure.
     """
-    Randomly place rectangular obstacles subject to:
-      - BFS connectivity  : no enclosed region (walls included).
-      - Spawn clearance   : OBS_CLEAR_RADIUS around every SPAWN_POSITION.
-      - Inter-obstacle gap: OBS_GAP between every pair of rects.
-      - Wall margin       : OBS_WALL_MARGIN from every edge.
-      - Coverage cap      : <= MAX_OBS_COVERAGE of total map area.
-      - Count cap         : <= MAX_OBSTACLES rects.
-    Returns list of dicts {x, y, w, h}.
+    zone_w = MAP_W // ZONE_COLS
+    zone_h = MAP_H // ZONE_ROWS
+    x0 = zone_col * zone_w + OBS_WALL_MARGIN
+    y0 = zone_row * zone_h + OBS_WALL_MARGIN
+    x1 = (zone_col + 1) * zone_w - OBS_WALL_MARGIN
+    y1 = (zone_row + 1) * zone_h - OBS_WALL_MARGIN
+    for _ in range(ZONE_ATTEMPTS):
+        w = random.choice(_OBS_WIDTHS)
+        h = random.choice(_OBS_HEIGHTS)
+        if x1 - w < x0 or y1 - h < y0:
+            continue
+        x = random.randint(x0, x1 - w)
+        y = random.randint(y0, y1 - h)
+        if _obstacles_overlap(x, y, w, h, placed):
+            continue
+        if _near_spawn(x, y, w, h, active_spawns):
+            continue
+        if not _is_map_connected(placed + [(x, y, w, h)]):
+            continue
+        return placed + [(x, y, w, h)]
+    return None
+
+
+def generate_obstacles(active_spawns):
     """
-    placed = []       # accepted (x, y, w, h) tuples
+    Zone-biased obstacle placement:
+      Phase 1 — seed: attempt MIN_PER_ZONE obstacles in each zone (ZONE_COLS×ZONE_ROWS
+                grid), so coverage is spread across the whole map.
+      Phase 2 — fill: top up with global random placement up to MAX_OBSTACLES.
+    Only the spawn points actually used by connected players (active_spawns) receive
+    a clearance zone — unused spawn positions are fair game for obstacle placement.
+    Returns list of strip dicts {x, y, w, h}.
+    """
+    placed = []
     total_area = 0
     max_area = MAP_W * MAP_H * MAX_OBS_COVERAGE
-    failures = 0
 
+    # ── Phase 1: zone seeding ──────────────────────────────────────────────────
+    zones = [(c, r) for r in range(ZONE_ROWS) for c in range(ZONE_COLS)]
+    random.shuffle(zones)          # randomise visit order each game
+    for _ in range(MIN_PER_ZONE):  # repeat until each zone has MIN_PER_ZONE
+        for (zc, zr) in zones:
+            if len(placed) >= MAX_OBSTACLES or total_area >= max_area:
+                break
+            result = _try_place_in_zone(zc, zr, placed, active_spawns)
+            if result is not None:
+                new = result[-1]
+                total_area += new[2] * new[3]
+                placed = result
+
+    # ── Phase 2: global random fill ───────────────────────────────────────────
+    failures = 0
     while len(placed) < MAX_OBSTACLES and failures < MAX_FAILURES and total_area < max_area:
         w = random.choice(_OBS_WIDTHS)
         h = random.choice(_OBS_HEIGHTS)
         x = random.randint(OBS_WALL_MARGIN, MAP_W - OBS_WALL_MARGIN - w)
         y = random.randint(OBS_WALL_MARGIN, MAP_H - OBS_WALL_MARGIN - h)
-
         if _obstacles_overlap(x, y, w, h, placed):
             failures += 1
             continue
-        if _near_spawn(x, y, w, h):
+        if _near_spawn(x, y, w, h, active_spawns):
             failures += 1
             continue
         if not _is_map_connected(placed + [(x, y, w, h)]):
             failures += 1
             continue
-
         placed.append((x, y, w, h))
         total_area += w * h
-        failures = 0   # reset consecutive-failure counter on success
+        failures = 0
 
     strips = _decompose_to_strips(placed)
     print(f"Generated {len(placed)} obstacle blocks → {len(strips)} row strips "
@@ -977,7 +1021,10 @@ class GameServer:
                 sx, sy = SPAWN_POSITIONS[i % len(SPAWN_POSITIONS)]
                 player["x"] = float(sx)
                 player["y"] = float(sy)
-        self.obstacles = generate_obstacles()
+        n = len(self.players)
+        active_spawns = [SPAWN_POSITIONS[i %
+                                         len(SPAWN_POSITIONS)] for i in range(n)]
+        self.obstacles = generate_obstacles(active_spawns)
         print(f"Game starting! Map: {map_size} ({map_w}\u00d7{map_h})")
         self.broadcast(MessageType.GAME_START, {
             "obstacles": self.obstacles,
