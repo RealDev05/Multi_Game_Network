@@ -8,6 +8,7 @@ import threading
 import sys
 import math
 import select
+import os
 from protocol import MessageType, encode_message, decode_message, encode_udp, decode_udp
 from entities import Player, Bullet, Obstacle, Crate, LaserBeam, draw_text
 
@@ -94,6 +95,9 @@ class GameClient:
         self.map_h = 600
         # (w, h) set by receive thread, applied on main thread
         self.pending_resize = None
+
+        # Background sprite (lazy-loaded and scaled to map size in draw_game)
+        self.background_surf = None
 
     def connect_to_server(self, host, port):
         """Connect to game server."""
@@ -484,7 +488,16 @@ class GameClient:
     def draw_game(self):
         """Draw the game screen."""
         dt = self.clock.get_time() / 1000.0
-        self.screen.fill((40, 40, 60))
+
+        # Background — lazy-load and re-scale whenever map size changes
+        if (self.background_surf is None or
+                self.background_surf.get_size() != (self.map_w, self.map_h)):
+            _bg_raw = pygame.image.load(
+                os.path.join("assets", "backgrounddetailed1.png")
+            ).convert()
+            self.background_surf = pygame.transform.scale(
+                _bg_raw, (self.map_w, self.map_h))
+        self.screen.blit(self.background_surf, (0, 0))
 
         # Draw obstacles first (beneath everything)
         for obstacle in self.obstacles:

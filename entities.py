@@ -4,6 +4,105 @@ Game entities: Player, Bullet, Obstacle, Crate, LaserBeam with rendering logic.
 
 import pygame
 import math
+import os
+
+# ── Tank sprite constants ───────────────────────────────────────────────────────
+# Width to render the sprite at (height scales proportionally).
+# Keep diameter <= 2 * Player.radius (15) so the sprite fits the hitbox.
+_TANK_SPRITE_SIZE = 28
+# Angle offset: sprite barrel points DOWN in the image (+y). In-game angle=0
+# means barrel points RIGHT (+x). pygame.transform.rotate is counter-clockwise.
+# offset = 270 aligns down→right and also corrects the 180° flip.
+_TANK_ANGLE_OFFSET = 270
+
+_tank_base: pygame.Surface = None     # raw scaled surface, loaded once
+_tank_tinted: dict = {}               # color tuple → tinted Surface (cached)
+
+# ── Sandbag obstacle sprite ──────────────────────────────────────────────────
+# Each sandbag tile is rendered at this size (proportional to 211×147 source).
+_SB_W = 48
+_SB_H = 34
+# 25 % overlap → step between tile origins
+_SB_STEP_X = int(_SB_W * 0.75)   # 36 px
+_SB_STEP_Y = int(_SB_H * 0.75)   # 25 px
+# Odd rows are shifted right by half a step (brick-wall pattern)
+_SB_OFFSET_X = _SB_STEP_X // 2   # 18 px
+
+_sandbag_raw: pygame.Surface = None   # original RGBA surface loaded once
+_sandbag_tile: pygame.Surface = None  # single tile scaled to (_SB_W, _SB_H)
+_sandbag_cache: dict = {}             # (w, h) → composed Surface
+
+
+def _get_sandbag_tile() -> pygame.Surface:
+    global _sandbag_raw, _sandbag_tile
+    if _sandbag_tile is None:
+        if _sandbag_raw is None:
+            path = os.path.join(os.path.dirname(__file__),
+                                "assets", "sandbag.png")
+            _sandbag_raw = pygame.image.load(path).convert_alpha()
+        _sandbag_tile = pygame.transform.smoothscale(
+            _sandbag_raw, (_SB_W, _SB_H))
+    return _sandbag_tile
+
+
+def _build_sandbag_surface(w: int, h: int) -> pygame.Surface:
+    """Compose a (w, h) surface filled with 25%-overlapping sandbag tiles.
+    Odd rows are shifted right by half a step (brick-wall pattern).
+    Only fully-visible tiles are drawn — edges may have empty space, no cut-off.
+    """
+    surf = pygame.Surface((w, h), pygame.SRCALPHA)
+    tile = _get_sandbag_tile()
+    row = 0
+    y = 0
+    while y + _SB_H <= h:
+        x_start = _SB_OFFSET_X if row % 2 else 0   # shift odd rows right
+        x = x_start
+        while x + _SB_W <= w:
+            surf.blit(tile, (x, y))
+            x += _SB_STEP_X
+        y += _SB_STEP_Y
+        row += 1
+    return surf
+
+
+def _get_sandbag(w: int, h: int) -> pygame.Surface:
+    """Return a tiled sandbag surface for obstacle size (w, h), cached."""
+    key = (w, h)
+    if key not in _sandbag_cache:
+        _sandbag_cache[key] = _build_sandbag_surface(w, h)
+    return _sandbag_cache[key]
+
+
+def _load_tank_base() -> pygame.Surface:
+    """Load and scale the grayscale tank sprite (once)."""
+    global _tank_base
+    if _tank_base is None:
+        path = os.path.join(os.path.dirname(__file__),
+                            "assets", "tanks_grayscale.png")
+        raw = pygame.image.load(path).convert_alpha()
+        h = int(_TANK_SPRITE_SIZE * raw.get_height() / raw.get_width())
+        _tank_base = pygame.transform.smoothscale(raw, (_TANK_SPRITE_SIZE, h))
+    return _tank_base
+
+
+def _get_tinted_tank(color: tuple) -> pygame.Surface:
+    """Return a cached softly color-tinted copy of the tank sprite."""
+    key = color[:3]
+    if key not in _tank_tinted:
+        base = _load_tank_base()
+        # Blend: 60% tint color + 40% original grayscale so detail stays visible.
+        tinted = base.copy()
+        tint_layer = base.copy()
+        tint_layer.fill((*key, 255), special_flags=pygame.BLEND_RGBA_MULT)
+        tinted.blit(tint_layer, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+        # Restore 40% of the original brightness on top
+        restore = base.copy()
+        restore.fill((255, 255, 255, 100),
+                     special_flags=pygame.BLEND_RGBA_MULT)
+        tinted.blit(restore, (0, 0), special_flags=pygame.BLEND_RGBA_ADD)
+        _tank_tinted[key] = tinted
+    return _tank_tinted[key]
+
 
 # Crate colours
 CRATE_COLORS = {
@@ -27,7 +126,8 @@ class Player:
         self.health = 3
         self.alive = True
         self.is_local = is_local
-        self.radius = 15
+        # matches server PLAYER_RADIUS (circumscribed sprite circle)
+        self.radius = 20
         # power-ups (tracked client-side for rendering only)
         self.shield = 0
         self.laser_shots = 0
@@ -45,49 +145,31 @@ class Player:
         self.bouncy_shots = data.get("bouncy_shots", self.bouncy_shots)
 
     def draw(self, surface):
-        """Draw the player tank."""
+        """Draw the player tank using the sprite."""
         pos = (int(self.x), int(self.y))
-        alpha = 100 if not self.alive else 255
 
-        # Shield ring (drawn behind the tank body)
+        # Shield ring (behind everything)
         if self.shield > 0 and self.alive:
             pygame.draw.circle(surface, (80, 160, 255),
-                               pos, self.radius + 5, 2)
+                               pos, self.radius + 6, 2)
 
-        # Tank body
+        # Tinted + rotated sprite
+        tinted = _get_tinted_tank(self.color)
+        rotated = pygame.transform.rotate(
+            tinted, -(self.angle + _TANK_ANGLE_OFFSET))
         if not self.alive:
-            temp = pygame.Surface(
-                (self.radius * 2 + 10, self.radius * 2 + 10), pygame.SRCALPHA)
-            pygame.draw.circle(temp, (*self.color, alpha),
-                               (self.radius + 5, self.radius + 5), self.radius)
-            surface.blit(temp, (int(self.x) - self.radius - 5,
-                                int(self.y) - self.radius - 5))
-        else:
-            pygame.draw.circle(surface, self.color, pos, self.radius)
-
-        # Barrel — tinted by active power-up (laser > bouncy > normal)
-        angle_rad = math.radians(self.angle)
-        barrel_length = 25
-        barrel_end = (
-            int(self.x + math.cos(angle_rad) * barrel_length),
-            int(self.y + math.sin(angle_rad) * barrel_length)
-        )
-        if self.alive:
-            if self.laser_shots > 0:
-                barrel_col = CRATE_COLORS["laser"]
-            elif self.bouncy_shots > 0:
-                barrel_col = CRATE_COLORS["bouncy"]
-            else:
-                barrel_col = self.color
-        else:
-            barrel_col = (*self.color, alpha)
-        pygame.draw.line(surface, barrel_col, pos, barrel_end, 3)
+            # Fade-out for dead/spectator players (per-pixel alpha surface)
+            rotated = rotated.copy()
+            rotated.fill((255, 255, 255, 100),
+                         special_flags=pygame.BLEND_RGBA_MULT)
+        rr = rotated.get_rect(center=pos)
+        surface.blit(rotated, rr)
 
         # Health bar
         if self.alive:
             bw, bh = 30, 5
             bx = self.x - bw / 2
-            by = self.y - self.radius - 10
+            by = self.y - self.radius - 12
             pygame.draw.rect(surface, (100, 100, 100), (bx, by, bw, bh))
             pygame.draw.rect(surface, (0, 255, 0),
                              (bx, by, (self.health / 3) * bw, bh))
@@ -145,23 +227,8 @@ class Obstacle:
         self.rect = pygame.Rect(x, y, w, h)
 
     def draw(self, surface):
-        """Draw the obstacle as a stone-like block with bevelled edges."""
-        # Main fill
-        pygame.draw.rect(surface, (75, 75, 85), self.rect)
-        # Top-left highlight
-        pygame.draw.line(surface, (115, 115, 128),
-                         (self.x, self.y), (self.x + self.w - 1, self.y), 2)
-        pygame.draw.line(surface, (115, 115, 128),
-                         (self.x, self.y), (self.x, self.y + self.h - 1), 2)
-        # Bottom-right shadow
-        pygame.draw.line(surface, (38, 38, 46),
-                         (self.x + self.w, self.y),
-                         (self.x + self.w, self.y + self.h), 2)
-        pygame.draw.line(surface, (38, 38, 46),
-                         (self.x, self.y + self.h),
-                         (self.x + self.w, self.y + self.h), 2)
-        # Thin outer border
-        pygame.draw.rect(surface, (52, 52, 62), self.rect, 1)
+        """Draw the obstacle as a brick-laid pile of sandbag sprites."""
+        surface.blit(_get_sandbag(self.w, self.h), (self.x, self.y))
 
 
 class Crate:

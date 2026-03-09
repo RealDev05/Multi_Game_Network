@@ -20,9 +20,14 @@ MAP_SIZES = {
     "medium": (1100, 750),
     "large":  (1400, 900),
 }
-PLAYER_RADIUS = 15
-OBS_MIN_W, OBS_MAX_W = 40, 120
-OBS_MIN_H, OBS_MAX_H = 40, 100
+# circumscribed radius of the sprite (diagonal/2 ≈ 21.6 for 28×33 sprite)
+PLAYER_RADIUS = 20
+# Obstacle dimensions snapped to exact sandbag-tile multiples so no tile is
+# ever cut off. Tile size 48×34, step 36×25 (25% overlap).
+# Valid widths  : 48 + n*36  → n=0..3  → {48, 84, 120, 156}
+# Valid heights : 34 + m*25  → m=1..3  → {59, 84, 109}
+_OBS_WIDTHS = [48, 84, 120, 156]
+_OBS_HEIGHTS = [59, 84, 109]
 OBS_WALL_MARGIN = 30    # obstacles stay at least this far from every wall
 OBS_GAP = 30    # minimum clear gap between any two obstacles
 OBS_CLEAR_RADIUS = 70    # no obstacle within this px radius of any spawn point
@@ -231,8 +236,8 @@ def generate_obstacles():
     failures = 0
 
     while len(placed) < MAX_OBSTACLES and failures < MAX_FAILURES and total_area < max_area:
-        w = random.randint(OBS_MIN_W, OBS_MAX_W)
-        h = random.randint(OBS_MIN_H, OBS_MAX_H)
+        w = random.choice(_OBS_WIDTHS)
+        h = random.choice(_OBS_HEIGHTS)
         x = random.randint(OBS_WALL_MARGIN, MAP_W - OBS_WALL_MARGIN - w)
         y = random.randint(OBS_WALL_MARGIN, MAP_H - OBS_WALL_MARGIN - h)
 
@@ -636,22 +641,21 @@ class GameServer:
 
                     player_input = player.get("input", {})
 
-                    # Movement (holonomic)
+                    # Movement — directional (forward/back along facing angle)
                     speed = 200 * dt
+                    angle_rad = math.radians(player["angle"])
                     if player_input.get("w"):
-                        player["y"] -= speed
+                        player["x"] += math.cos(angle_rad) * speed
+                        player["y"] += math.sin(angle_rad) * speed
                     if player_input.get("s"):
-                        player["y"] += speed
-                    if player_input.get("a"):
-                        player["x"] -= speed
-                    if player_input.get("d"):
-                        player["x"] += speed
+                        player["x"] -= math.cos(angle_rad) * speed
+                        player["y"] -= math.sin(angle_rad) * speed
 
-                    # Rotation
+                    # Rotation — A/D keys as well as arrow keys
                     rotation_speed = 180 * dt  # degrees per second
-                    if player_input.get("left"):
+                    if player_input.get("left") or player_input.get("a"):
                         player["angle"] -= rotation_speed
-                    if player_input.get("right"):
+                    if player_input.get("right") or player_input.get("d"):
                         player["angle"] += rotation_speed
 
                     # Shooting
@@ -814,7 +818,8 @@ class GameServer:
                         dx = bullet["x"] - player["x"]
                         dy = bullet["y"] - player["y"]
                         dist_sq = dx*dx + dy*dy
-                        if dist_sq < (15 + 5) ** 2:  # player radius + bullet radius
+                        # player radius + bullet radius
+                        if dist_sq < (PLAYER_RADIUS + 5) ** 2:
                             if player.get("shield", 0) > 0:
                                 # shield absorbs the hit
                                 player["shield"] -= 1
