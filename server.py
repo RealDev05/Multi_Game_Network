@@ -1025,12 +1025,15 @@ class GameServer:
         active_spawns = [SPAWN_POSITIONS[i %
                                          len(SPAWN_POSITIONS)] for i in range(n)]
         self.obstacles = generate_obstacles(active_spawns)
-        print(f"Game starting! Map: {map_size} ({map_w}\u00d7{map_h})")
+        bg_index = random.randint(1, 7)
+        print(
+            f"Game starting! Map: {map_size} ({map_w}\u00d7{map_h}), background: {bg_index}")
         self.broadcast(MessageType.GAME_START, {
             "obstacles": self.obstacles,
             "map_w": map_w,
             "map_h": map_h,
             "map_size": map_size,
+            "bg_index": bg_index,
         })
         return True
 

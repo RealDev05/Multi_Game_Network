@@ -7,6 +7,7 @@ import socket
 import threading
 import sys
 import math
+import random
 import select
 import os
 from protocol import MessageType, encode_message, decode_message, encode_udp, decode_udp
@@ -98,6 +99,7 @@ class GameClient:
 
         # Background sprite (lazy-loaded and scaled to map size in draw_game)
         self.background_surf = None
+        self._bg_file = None
 
     def connect_to_server(self, host, port):
         """Connect to game server."""
@@ -228,6 +230,13 @@ class GameClient:
             self.obstacles = [
                 Obstacle(o["x"], o["y"], o["w"], o["h"]) for o in obstacles_data
             ]
+            # Use the background chosen by the server so all clients match
+            bg_index = data.get("bg_index", 1)
+            self._bg_file = os.path.join(
+                "assets",
+                f"backgrounddetailed{bg_index}.png"
+            )
+            self.background_surf = None   # force re-load with new file
             self.state = GameState.GAME
 
         elif msg_type == MessageType.GAME_OVER:
@@ -492,9 +501,9 @@ class GameClient:
         # Background — lazy-load and re-scale whenever map size changes
         if (self.background_surf is None or
                 self.background_surf.get_size() != (self.map_w, self.map_h)):
-            _bg_raw = pygame.image.load(
-                os.path.join("assets", "backgrounddetailed1.png")
-            ).convert()
+            bg_path = self._bg_file or os.path.join(
+                "assets", "backgrounddetailed1.png")
+            _bg_raw = pygame.image.load(bg_path).convert()
             self.background_surf = pygame.transform.scale(
                 _bg_raw, (self.map_w, self.map_h))
         self.screen.blit(self.background_surf, (0, 0))
