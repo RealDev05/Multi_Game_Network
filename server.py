@@ -75,7 +75,7 @@ CRATE_OBS_MARGIN = 18      # keep away from obstacle edges
 CRATE_SPAWN_ATTEMPTS = 100    # max random attempts per spawn
 MAX_SHIELD = 3       # maximum shield stacks
 BOUNCY_SHOTS_PER_CRATE = 3   # bouncy bullets granted per crate
-BOUNCY_MAX_BOUNCES = 3       # how many times a bouncy bullet can reflect
+BOUNCY_MAX_BOUNCES = 5       # how many times a bouncy bullet can reflect
 LASER_BULLET_SPEED = 0       # lasers are instant — not a moving projectile
 
 
@@ -1000,7 +1000,7 @@ class GameServer:
                     print(f"Game over! Player {winner_id} wins!")
                     self._pending_game_over = {
                         "winner_id": winner_id, "winner_color": winner_color,
-                        "send_at": time.time() + 2.0}
+                        "send_at": time.time() + 1.5}
 
             # Broadcast game state via UDP (falls back to TCP for unregistered clients)
             self.broadcast_udp(self.game_state)
