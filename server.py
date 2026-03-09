@@ -28,6 +28,12 @@ PLAYER_RADIUS = 20
 # Valid heights : 34 + m*25  → m=1..3  → {59, 84, 109}
 _OBS_WIDTHS = [48, 84, 120, 156]
 _OBS_HEIGHTS = [59, 84, 109]
+# Sandbag tile parameters (mirrors entities.py) — used to split blocks into per-row strips.
+_SB_W = 48
+_SB_H = 34
+_SB_STEP_X = int(_SB_W * 0.75)   # 36 px
+_SB_STEP_Y = int(_SB_H * 0.75)   # 25 px
+_SB_OFFSET_X = _SB_STEP_X // 2   # 18 px
 OBS_WALL_MARGIN = 30    # obstacles stay at least this far from every wall
 OBS_GAP = 30    # minimum clear gap between any two obstacles
 OBS_CLEAR_RADIUS = 70    # no obstacle within this px radius of any spawn point
@@ -219,6 +225,35 @@ def _apply_crate(ctype, player):
             "bouncy_shots", 0) + BOUNCY_SHOTS_PER_CRATE
 
 
+def _decompose_to_strips(placed):
+    """Convert block (x, y, w, h) tuples into per-sandbag-row strip dicts.
+    Even rows: same x, full w.
+    Odd rows: shifted right by _SB_OFFSET_X, narrower w (only whole tiles that fit).
+    Each strip's hitbox covers exactly the tiles drawn — no empty-space hitbox.
+    """
+    strips = []
+    for (x, y, w, h) in placed:
+        row = 0
+        ry = y
+        while ry + _SB_H <= y + h:
+            if row % 2 == 0:
+                strips.append({"x": x, "y": ry, "w": w, "h": _SB_H})
+            else:
+                # Find the last tile that fits within the block width
+                last_tx = None
+                tx = _SB_OFFSET_X
+                while tx + _SB_W <= w:
+                    last_tx = tx
+                    tx += _SB_STEP_X
+                if last_tx is not None:
+                    odd_w = last_tx + _SB_W - _SB_OFFSET_X
+                    strips.append(
+                        {"x": x + _SB_OFFSET_X, "y": ry, "w": odd_w, "h": _SB_H})
+            ry += _SB_STEP_Y
+            row += 1
+    return strips
+
+
 def generate_obstacles():
     """
     Randomly place rectangular obstacles subject to:
@@ -255,9 +290,10 @@ def generate_obstacles():
         total_area += w * h
         failures = 0   # reset consecutive-failure counter on success
 
-    print(f"Generated {len(placed)} obstacles "
+    strips = _decompose_to_strips(placed)
+    print(f"Generated {len(placed)} obstacle blocks → {len(strips)} row strips "
           f"({total_area / (MAP_W * MAP_H) * 100:.1f}% map coverage)")
-    return [{"x": x, "y": y, "w": w, "h": h} for x, y, w, h in placed]
+    return strips
 
 
 class GameServer:
